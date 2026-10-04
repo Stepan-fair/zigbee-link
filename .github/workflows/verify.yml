@@ -47,10 +47,19 @@ jobs:
           docker logs zigbee-check
           test "$(docker inspect -f '{{.State.Running}}' zigbee-check)" = true
           docker exec zigbee-check ip -4 addr show dev zigbee0 | grep '172.31.254.1/24'
+          docker exec zigbee-check python3 -c 'from app.arp import ArpProbe; from app.manager import Identity; from ipaddress import IPv4Address; from pathlib import Path; i=Identity.load_or_create(Path("/data")); target=IPv4Address("172.31.254.2"); r=ArpProbe().check_address("zigbee0",i.mac,target); assert r.complete and r.responders.get(target), r'
           docker exec zigbee-check python3 -c 'from pathlib import Path; print(Path("/proc/1/attr/current").read_text())' | grep "$profile (enforce)"
           docker stop -t 15 zigbee-check
           test "$(docker inspect -f '{{.State.ExitCode}}' zigbee-check)" = 0
           docker rm zigbee-check
+          # Verify the unmodified production entrypoint under the same enforced profile.
+          docker run -d --name zigbee-entry --network none --security-opt "apparmor=$profile" --cap-drop ALL --cap-add NET_ADMIN --cap-add NET_RAW -v "$RUNNER_TEMP/zigbee-data:/data" zigbee-link:ci
+          sleep 2
+          docker logs zigbee-entry
+          test "$(docker inspect -f '{{.State.Running}}' zigbee-entry)" = true
+          docker stop -t 15 zigbee-entry
+          test "$(docker inspect -f '{{.State.ExitCode}}' zigbee-entry)" = 0
+          docker rm zigbee-entry
           docker rm -f zigbee-radio
           docker network rm zigbee-ci
           sudo apparmor_parser -R "$RUNNER_TEMP/zigbee-apparmor"
