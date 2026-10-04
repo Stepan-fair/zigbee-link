@@ -13,27 +13,41 @@ class FakeRunner:
         self.links = [{"ifname": "eth0", "ifindex": 1, "link_type": "ether", "flags": ["UP", "LOWER_UP"]}]
         self.addresses = []
         self.routes = [{"dst": "default", "dev": "eth0"}]
-        self.commands = []; self.fail_address = None; self.replace_on_delete = False
+        self.commands = []; self.fail_address = None; self.fail_once = False; self.replace_on_delete = False
+        self.qdiscs = []; self.filters = []
 
     def classify(self, links): return {"eth0": "ethernet"}
 
     def run(self, args):
+        if args[0] == "tc":
+            if "-j" in args: return json.dumps(self.qdiscs if "qdisc" in args else self.filters)
+            self.commands.append(args)
+            if "qdisc" in args: self.qdiscs = [{"kind": "clsact"}]
+            else: self.filters = [{"protocol": "ipv6", "pref": 49151, "kind": "matchall", "options": {"actions": [{"kind": "gact", "control_action": {"type": "drop"}}]}}]
+            return ""
         if "-j" in args:
             records = self.links if "link" in args else self.addresses if "addr" in args else self.routes
             return json.dumps(copy.deepcopy(records))
         self.commands.append(args)
         if args[:3] == ["ip", "link", "add"]:
-            self.links.append({"ifname": "zigbee0", "ifindex": 2, "link_index": 1, "link_type": "ether", "flags": [], "address": args[args.index("address") + 1], "ifalias": args[args.index("alias") + 1], "linkinfo": {"info_kind": "macvlan", "info_data": {"mode": "bridge"}}})
+            parent = next(l for l in self.links if l["ifname"] == args[args.index("link", 3) + 1])
+            self.qdiscs = []; self.filters = []
+            self.links.append({"ifname": "zigbee0", "ifindex": max(l["ifindex"] for l in self.links) + 1, "link_index": parent["ifindex"], "link_type": "ether", "flags": [], "address": args[args.index("address") + 1], "linkinfo": {"info_kind": "macvlan", "info_data": {"mode": "bridge"}}})
         elif args[:3] == ["ip", "link", "set"]:
             l = next(l for l in self.links if l["ifname"] == "zigbee0")
-            l["flags"] = ["UP", "LOWER_UP"]
+            if "alias" in args: l["ifalias"] = args[args.index("alias") + 1]
+            elif "addrgenmode" in args: l["inet6_addr_gen_mode"] = "none"
+            elif "down" in args: l["flags"] = []
+            else: l["flags"] = ["UP", "LOWER_UP"]
         elif args[:3] == ["ip", "link", "delete"]:
             self.links = [l for l in self.links if l["ifname"] != "zigbee0"]
             self.addresses = [a for a in self.addresses if a["ifname"] != "zigbee0"]
             self.routes = [r for r in self.routes if r.get("dev") != "zigbee0"]
         elif args[:3] == ["ip", "addr", "add"]:
             value = args[3]
-            if value == self.fail_address: raise NetworkError("injected assignment failure")
+            if value == self.fail_address:
+                if self.fail_once: self.fail_address = None
+                raise NetworkError("injected assignment failure")
             ip, prefix = value.split("/")
             self.addresses = [{"ifname": "zigbee0", "addr_info": [{"family": "inet", "local": ip, "prefixlen": int(prefix)}]}]
             self.routes.append({"dst": str(parse_settings({"address": value}).address.network), "dev": "zigbee0"})
@@ -152,3 +166,29 @@ def test_new_conflict_on_existing_address_removes_owned_address(tmp_path):
     p.conflict = True; m.verified_at = 0
     assert m.reconcile().state == "error"
     assert len(r.links) == 1
+
+
+def test_parent_only_failure_restores_old_parent(tmp_path):
+    m, r, p = make(tmp_path); assert m.reconcile().state == "ready"
+    r.links.append({"ifname": "eth1", "ifindex": 9, "link_type": "ether", "flags": ["UP", "LOWER_UP"]})
+    r.classify = lambda links: {"eth0": "ethernet", "eth1": "ethernet"}
+    r.fail_address = "172.31.254.1/24"; r.fail_once = True
+    m.settings = parse_settings({"parent": "eth1", "scan_enabled": False})
+    assert m.reconcile().state == "error"
+    assert m.identity.parent == "eth0"
+    assert r.addresses[0]["addr_info"][0]["local"] == "172.31.254.1"
+
+
+def test_link_return_rechecks_address_even_within_minute(tmp_path):
+    m, r, p = make(tmp_path); assert m.reconcile().state == "ready"
+    r.links[0]["flags"] = ["UP"]
+    assert m.reconcile().state == "waiting"
+    r.links[0]["flags"] = ["UP", "LOWER_UP"]; p.conflict = True
+    assert m.reconcile().state == "error"
+    assert p.checked == 2
+
+
+def test_ipv6_ingress_block_installed_before_up(tmp_path):
+    m, r, p = make(tmp_path); assert m.reconcile().state == "ready"
+    up_index = next(i for i, args in enumerate(r.commands) if args[:3] == ["ip", "link", "set"] and "up" in args)
+    assert any(args[0] == "tc" and "ipv6" in args and "drop" in args for args in r.commands[:up_index])

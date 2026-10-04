@@ -157,3 +157,27 @@ def test_bridge_consumer_reaches_both_coordinators(lan):
         inside(lan, '''manager.stop()''')
     finally:
         subprocess.run(["ip", "netns", "delete", client], capture_output=True)
+
+
+def test_unsolicited_ipv6_ra_cannot_add_address_or_route(lan):
+    names, _ = lan
+    inside(lan, '''assert manager.reconcile().state == "ready"''')
+    # Model an ordinary IPv6-enabled host. RA is sent both to Ethernet multicast
+    # and directly to the virtual MAC, so a multicast flag alone cannot pass this test.
+    mac = __import__("json").loads(run("ip", "-n", names["h"], "-j", "link", "show", "dev", "zigbee0"))[0]["address"]
+    run("ip", "netns", "exec", names["h"], "sysctl", "-w", "net.ipv6.conf.zigbee0.accept_ra=1")
+    script = f'''
+from scapy.all import Ether, IPv6, ICMPv6ND_RA, ICMPv6NDOptPrefixInfo, sendp
+for dst in ("33:33:00:00:00:01", {mac!r}):
+    packet=Ether(dst=dst)/IPv6(src="fe80::2",dst="ff02::1",hlim=255)/ICMPv6ND_RA(routerlifetime=1800)/ICMPv6NDOptPrefixInfo(prefix="fd00:31:254::",prefixlen=64,L=1,A=1,validlifetime=3600,preferredlifetime=1800)
+    sendp(packet,iface="eth0",count=3,inter=0.1,verbose=False)
+'''
+    run("ip", "netns", "exec", names["a"], sys.executable, "-c", script)
+    inside(lan, '''
+addresses=json.loads(runner.run(["ip","-j","-6","addr","show","dev","zigbee0"]))
+assert not addresses[0]["addr_info"], addresses
+routes=json.loads(runner.run(["ip","-j","-6","route","show","dev","zigbee0","table","all"]))
+assert not routes, routes
+subprocess.run(["ping","-c","1","-W","2","172.31.254.2"], check=True)
+manager.stop()
+''')

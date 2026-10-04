@@ -55,3 +55,13 @@ def test_no_carrier_waits_and_vpn_default_not_selected():
     with pytest.raises(NetworkError):
         select_parent(parse_settings({}), snapshot([link("eth0", flags=["UP"])]))
     assert select_parent(parse_settings({}), snapshot([link("eth0"), link("tun0")], [{"dst": "default", "dev": "tun0"}])) == "eth0"
+
+
+@pytest.mark.parametrize("addr", [{"local": "172.31.254.9", "prefixlen": 24}, {"family": "inet", "local": "bad", "prefixlen": 24}, {"family": "inet", "local": "172.31.254.9"}, "bad"])
+def test_nested_malformed_address_records_fail_closed(addr):
+    class Runner:
+        def run(self, argv):
+            import json
+            return json.dumps([{"ifname": "eth0", "addr_info": [addr]}] if "addr" in argv else [])
+        def classify(self, links): return {}
+    with pytest.raises(NetworkError): read_snapshot(Runner())

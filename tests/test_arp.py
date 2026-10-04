@@ -71,3 +71,21 @@ def test_scan_is_bounded_and_cancellable():
 def test_scan_rejects_large_network():
     with pytest.raises(ValueError):
         ArpProbe().scan("zigbee0", MAC, IPv4Address("172.31.254.1"), IPv4Network("172.31.0.0/16"))
+
+
+def test_competing_dad_probe_is_conflict():
+    class Socket:
+        packet = None
+        def bind(self, addr): pass
+        def setblocking(self, value): pass
+        def close(self): pass
+        def send(self, data):
+            self.packet = encode_probe("02:00:00:00:00:02", IPv4Address("172.31.254.1"), IPv4Address("0.0.0.0"))
+        def recv(self, size):
+            if self.packet:
+                value = self.packet; self.packet = None; return value
+            raise BlockingIOError
+    now = [0.0]
+    def wait(seconds): now[0] += seconds
+    result = ArpProbe(socket_factory=lambda *a: Socket(), clock=lambda: now[0], wait=wait).check_address("zigbee0", MAC, IPv4Address("172.31.254.1"))
+    assert result.responders[IPv4Address("172.31.254.1")] == {"02:00:00:00:00:02"}

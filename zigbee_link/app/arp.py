@@ -12,6 +12,8 @@ from .network import NetworkError
 class ArpReply:
     sender_ip: IPv4Address
     sender_mac: str
+    target_ip: IPv4Address | None = None
+    operation: int = 2
 
 
 @dataclass
@@ -47,7 +49,7 @@ def parse_reply(frame: bytes) -> ArpReply | None:
     sender = frame[22:28]
     if sender != frame[6:12] or sender == b"\x00" * 6 or sender[0] & 1:
         return None
-    return ArpReply(IPv4Address(frame[28:32]), ":".join(f"{b:02x}" for b in sender))
+    return ArpReply(IPv4Address(frame[28:32]), ":".join(f"{b:02x}" for b in sender), IPv4Address(frame[38:42]), op)
 
 
 class ArpProbe:
@@ -69,15 +71,18 @@ class ArpProbe:
                 sock.close()
             raise NetworkError(f"ARP-проверка недоступна ({type(exc).__name__})") from None
 
-    def _receive(self, sock, result, own_mac, allowed):
+    def _receive(self, sock, result, own_mac, allowed, detect_probes=False):
         # Bound work even under an ARP storm.
         for _ in range(256):
             try:
                 reply = parse_reply(sock.recv(2048))
             except BlockingIOError:
                 break
-            if reply and reply.sender_mac != own_mac and reply.sender_ip in allowed:
-                result.add(reply)
+            if reply and reply.sender_mac != own_mac:
+                if reply.sender_ip in allowed:
+                    result.add(reply)
+                elif detect_probes and reply.operation == 1 and reply.sender_ip == IPv4Address("0.0.0.0") and reply.target_ip in allowed:
+                    result.add(ArpReply(reply.target_ip, reply.sender_mac))
 
     def check_address(self, interface: str, source_mac: str, address: IPv4Address) -> ProbeResult:
         sock = self._open(interface)
@@ -91,12 +96,12 @@ class ArpProbe:
                 while self.clock() < end:
                     if self.cancelled():
                         return result
-                    self._receive(sock, result, source_mac, {address})
+                    self._receive(sock, result, source_mac, {address}, detect_probes=True)
                     if result.responders:
                         result.complete = True
                         return result
                     self.wait(0.02)
-            self._receive(sock, result, source_mac, {address})
+            self._receive(sock, result, source_mac, {address}, detect_probes=True)
             result.complete = True
             return result
         except OSError as exc:

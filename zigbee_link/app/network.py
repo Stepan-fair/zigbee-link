@@ -59,6 +59,10 @@ def read_snapshot(runner: CommandRunner) -> NetworkSnapshot:
         for addr in addresses:
             if not isinstance(addr.get("ifname"), str) or not isinstance(addr.get("addr_info"), list):
                 raise ValueError("invalid address record")
+            for entry in addr["addr_info"]:
+                if not isinstance(entry, dict) or entry.get("family") != "inet" or not isinstance(entry.get("local"), str) or type(entry.get("prefixlen")) is not int:
+                    raise ValueError("invalid nested IPv4 record")
+                IPv4Interface(f"{entry['local']}/{entry['prefixlen']}")
         for route in routes:
             if not isinstance(route.get("dst"), str):
                 raise ValueError("missing route destination")

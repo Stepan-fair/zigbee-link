@@ -26,6 +26,7 @@ class Identity:
     mac: str
     parent: str = ""
     address: str = ""
+    pending_index: int | None = None
 
     @property
     def alias(self):
@@ -49,7 +50,10 @@ class Identity:
                     parse_settings({"parent": parent})
                 if address:
                     parse_settings({"address": address})
-                return cls(data_dir, token, raw["mac"].lower(), parent, address)
+                pending = raw.get("pending_index")
+                if pending is not None and (type(pending) is not int or pending <= 0):
+                    raise ValueError("invalid pending identity")
+                return cls(data_dir, token, raw["mac"].lower(), parent, address, pending)
             mac = bytearray(secrets.token_bytes(6)); mac[0] = (mac[0] & 0xfc) | 2
             identity = cls(data_dir, str(uuid.uuid4()), ":".join(f"{b:02x}" for b in mac))
             identity.save()
@@ -61,7 +65,7 @@ class Identity:
         fd, temp = tempfile.mkstemp(prefix=".identity-", dir=self.directory)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump({"token": self.token, "mac": self.mac, "parent": self.parent, "address": self.address}, f)
+                json.dump({"token": self.token, "mac": self.mac, "parent": self.parent, "address": self.address, "pending_index": self.pending_index}, f)
                 f.flush(); os.fsync(f.fileno())
             os.chmod(temp, 0o600)
             os.replace(temp, self.directory / "identity.json")
@@ -85,12 +89,28 @@ class InterfaceManager:
         self.scanned = None
         self.blocked = False
 
-    def _owned(self, snapshot, link):
+    def _matches(self, snapshot, link):
         if not link or not self.identity.parent:
             return False
         parent = snapshot.link(self.identity.parent)
         info = link.get("linkinfo", {})
-        return bool(parent and link.get("ifalias") == self.identity.alias and link.get("address", "").lower() == self.identity.mac and info.get("info_kind") == "macvlan" and info.get("info_data", {}).get("mode") == "bridge" and (link.get("link_index") == parent["ifindex"] or link.get("link") == parent["ifname"]))
+        return bool(parent and link.get("address", "").lower() == self.identity.mac and info.get("info_kind") == "macvlan" and info.get("info_data", {}).get("mode") == "bridge" and (link.get("link_index") == parent["ifindex"] or link.get("link") == parent["ifname"]))
+
+    def _owned(self, snapshot, link):
+        return self._matches(snapshot, link) and link.get("ifalias") == self.identity.alias
+
+    def _finish_pending(self):
+        if self.identity.pending_index is None:
+            return
+        snapshot = read_snapshot(self.runner)
+        link = snapshot.link(INTERFACE)
+        if not self._matches(snapshot, link) or link["ifindex"] != self.identity.pending_index or link.get("ifalias", "") not in ("", self.identity.alias):
+            raise NetworkError("Не удалось подтвердить незавершённое создание zigbee0")
+        self._validate_extras(snapshot)
+        self.runner.run(["ip", "link", "set", "dev", INTERFACE, "alias", self.identity.alias])
+        self._guard(self.identity.pending_index)
+        self.identity.pending_index = None
+        self.identity.save()
 
     def _guard(self, expected_index=None):
         snapshot = read_snapshot(self.runner)
@@ -124,6 +144,29 @@ class InterfaceManager:
         self._command(["ip", "link", "delete", "dev", INTERFACE], link["ifindex"])
         self.verified = self.scanned = None
 
+    def _ipv4_only(self, index):
+        self._guard(index)
+        try:
+            qdiscs = json.loads(self.runner.run(["tc", "-j", "qdisc", "show", "dev", INTERFACE]))
+            filters = json.loads(self.runner.run(["tc", "-j", "filter", "show", "dev", INTERFACE, "ingress"]))
+            if not isinstance(qdiscs, list) or not isinstance(filters, list):
+                raise ValueError("invalid tc state")
+            valid = bool(filters) and all(f.get("protocol") == "ipv6" and f.get("pref") == 49151 and f.get("kind") == "matchall" for f in filters) and any(a.get("kind") == "gact" and a.get("control_action", {}).get("type") == "drop" for f in filters for a in f.get("options", {}).get("actions", []))
+            if filters and not valid:
+                raise NetworkError("Чужой ingress-фильтр на zigbee0; изменение запрещено")
+            if not valid:
+                _, link = self._guard(index)
+                if "UP" in link.get("flags", []):
+                    self._command(["ip", "link", "set", "dev", INTERFACE, "down"], index)
+                if not any(q.get("kind") == "clsact" for q in qdiscs):
+                    self._command(["tc", "qdisc", "add", "dev", INTERFACE, "clsact"], index)
+                self._command(["tc", "filter", "add", "dev", INTERFACE, "ingress", "protocol", "ipv6", "pref", "49151", "handle", "1", "matchall", "action", "drop"], index)
+            _, link = self._guard(index)
+            if link.get("inet6_addr_gen_mode") != "none":
+                self._command(["ip", "link", "set", "dev", INTERFACE, "addrgenmode", "none"], index)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise NetworkError("Не удалось проверить IPv4-защиту zigbee0") from exc
+
     def _has_address(self, snapshot, value):
         return any(r.get("ifname") == INTERFACE and any(a.get("family") == "inet" and f"{a['local']}/{a['prefixlen']}" == value for a in r.get("addr_info", [])) for r in snapshot.addresses)
 
@@ -146,12 +189,21 @@ class InterfaceManager:
             self.identity.parent = parent
             self.identity.address = ""
             self.identity.save()
-            # Alias and MAC are set as part of the single netlink creation operation.
-            self.runner.run(["ip", "link", "add", "name", INTERFACE, "link", parent, "address", self.identity.mac, "alias", self.identity.alias, "type", "macvlan", "mode", "bridge"])
+            # Kernel creation does not preserve ifalias on every iproute2/kernel combination.
+            self.runner.run(["ip", "link", "add", "name", INTERFACE, "link", parent, "address", self.identity.mac, "type", "macvlan", "mode", "bridge"])
+            snapshot = read_snapshot(self.runner)
+            link = snapshot.link(INTERFACE)
+            if not self._matches(snapshot, link) or link.get("ifalias"):
+                raise NetworkError("Не удалось подтвердить созданный zigbee0")
+            self.identity.pending_index = link["ifindex"]
+            self.identity.save()
+            self._finish_pending()
             snapshot, link = self._guard()
             old_address = ""
         index = link["ifindex"]
         value = str(settings.address)
+        self._ipv4_only(index)
+        snapshot, link = self._guard(index)
         if "UP" not in link.get("flags", []):
             self._command(["ip", "link", "set", "dev", INTERFACE, "up"], index)
         snapshot, link = self._guard(index)
@@ -199,6 +251,7 @@ class InterfaceManager:
         previous = (self.identity.parent, self.identity.address)
         had_owned = False
         try:
+            self._finish_pending()
             snapshot = read_snapshot(self.runner)
             link = snapshot.link(INTERFACE)
             had_owned = self._owned(snapshot, link)
@@ -207,13 +260,14 @@ class InterfaceManager:
             parent = select_parent(self.settings, snapshot)
             return self._prepare(self.settings, parent)
         except WaitingForLink as exc:
+            self.verified = self.scanned = None
             return Status("waiting", str(exc))
         except (NetworkError, OSError, ValueError) as exc:
             self.verified = self.scanned = None
             try:
                 if isinstance(exc, AddressConflict) and had_owned and str(self.settings.address) == previous[1]:
                     self._delete()
-                elif previous[1] and had_owned and previous != (self.settings.parent, str(self.settings.address)) and str(self.settings.address) != previous[1]:
+                elif previous[1] and had_owned and previous != (self.identity.parent, self.identity.address):
                     # Remove only the failed owned candidate, then rebuild the old configuration.
                     self._delete()
                     self._prepare(parse_settings({"parent": previous[0], "address": previous[1], "scan_enabled": False}), previous[0])
