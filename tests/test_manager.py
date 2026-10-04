@@ -163,7 +163,7 @@ def test_scan_cancel_never_ready(tmp_path):
 
 def test_new_conflict_on_existing_address_removes_owned_address(tmp_path):
     m, r, p = make(tmp_path); assert m.reconcile().state == "ready"
-    p.conflict = True; m.verified_at = 0
+    p.conflict = True; m.verified_at -= 61
     assert m.reconcile().state == "error"
     assert len(r.links) == 1
 
