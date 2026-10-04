@@ -21,6 +21,7 @@ profile zigbee_link flags=(attach_disconnected,mediate_deleted) {
   /usr/lib/** r,
   /lib/** mr,
   /usr/lib/python*/** r,
+  /opt/zigbee-link/ r,
   /opt/zigbee-link/** r,
   /etc/** r,
   /sys/class/net/ r,
