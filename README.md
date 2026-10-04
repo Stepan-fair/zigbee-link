@@ -16,4 +16,4 @@
 
 Приложение не содержит настроек конкретного дома, не отправляет диагностику во внешние службы, не меняет роутер, DHCP-профиль HA или настройки Zigbee2MQTT. Оно требует NET_ADMIN/NET_RAW и host networking для работы с собственным виртуальным интерфейсом; AppArmor включён.
 
-Исходники доступны в этом репозитории. Windows-тесты проверяют логику; Linux-тесты с настоящими macvlan проверяют сетевое поведение отдельно. Для разработки: Python 3.12+, `pytest` и `PyYAML`, затем `python -m pytest tests -q --tb=short`.
+Исходники доступны в этом репозитории. Для разработки: Python 3.12+, `pytest` и `PyYAML`. Windows: `python -m pytest tests -q --tb=short -m "not linux"`. Для полного Linux-прогона дополнительно нужны `scapy`, iproute2, ping, iptables и root-права для изолированных тестовых namespaces: `sudo python -m pytest tests -q --tb=short`. Окружение контейнерных проверок описано в GitHub Actions.
