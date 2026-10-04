@@ -42,16 +42,21 @@ jobs:
           # Runtime app code and production filtering are unchanged.
           docker run -d --name zigbee-check --network zigbee-ci --ip 192.168.50.20 --security-opt "apparmor=$profile" --cap-drop ALL --cap-add NET_ADMIN --cap-add NET_RAW -v "$RUNNER_TEMP/zigbee-data:/data" --entrypoint python3 zigbee-link:ci -c 'import app.main as m; from app.network import CommandRunner; import json; class_source="class Runner(CommandRunner):\n def classify(self,links): return {\"eth0\":\"ethernet\"}\n def run(self,args):\n  v=super().run(args)\n  if args[:5]==[\"ip\",\"-j\",\"-d\",\"link\",\"show\"]:\n   records=json.loads(v)\n   for r in records:\n    if r[\"ifname\"]==\"eth0\": r.pop(\"linkinfo\",None)\n   return json.dumps(records)\n  return v"; exec(class_source); m.CommandRunner=Runner; raise SystemExit(m.main())'
           sleep 5
-          test "$(docker inspect -f '{{.State.Running}}' zigbee-check)" = true
           docker logs zigbee-check
+          test "$(docker inspect -f '{{.State.Running}}' zigbee-check)" = true
           docker exec zigbee-check ip -4 addr show dev zigbee0 | grep '172.31.254.1/24'
-          docker exec zigbee-check cat /proc/1/attr/current | grep "$profile (enforce)"
+          docker exec zigbee-check python3 -c 'from pathlib import Path; print(Path("/proc/1/attr/current").read_text())' | grep "$profile (enforce)"
           docker stop -t 15 zigbee-check
           test "$(docker inspect -f '{{.State.ExitCode}}' zigbee-check)" = 0
           docker rm zigbee-check
           docker rm -f zigbee-radio
           docker network rm zigbee-ci
           sudo apparmor_parser -R "$RUNNER_TEMP/zigbee-apparmor"
+      - name: AppArmor failure diagnostics
+        if: failure()
+        run: |
+          docker logs zigbee-check 2>&1 || true
+          sudo dmesg | grep "zigbee_ci_${GITHUB_RUN_ID}" || true
   arm64-build:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
