@@ -1,0 +1,29 @@
+name: Zigbee Link
+description: Stable Ethernet connection to static LAN Zigbee coordinators
+version: 1.1.0
+slug: zigbee_link
+url: https://github.com/Stepan-fair/zigbee-link
+arch:
+  - amd64
+  - aarch64
+startup: system
+boot: auto
+host_network: true
+privileged:
+  - NET_ADMIN
+  - NET_RAW
+apparmor: true
+init: false
+timeout: 15
+options:
+  parent: auto
+  address: 172.31.254.1/24
+  coordinators: []
+  scan_enabled: true
+schema:
+  parent: str
+  address: str
+  coordinators:
+    - name: str
+      ip: str
+  scan_enabled: bool
