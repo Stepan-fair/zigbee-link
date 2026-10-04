@@ -192,3 +192,23 @@ def test_ipv6_ingress_block_installed_before_up(tmp_path):
     m, r, p = make(tmp_path); assert m.reconcile().state == "ready"
     up_index = next(i for i, args in enumerate(r.commands) if args[:3] == ["ip", "link", "set"] and "up" in args)
     assert any(args[0] == "tc" and "ipv6" in args and "drop" in args for args in r.commands[:up_index])
+
+
+def test_pending_creation_disappeared_can_restart(tmp_path):
+    m, r, p = make(tmp_path)
+    m.identity.parent = "eth0"
+    m.identity.pending_index = 7
+    m.identity.save()
+    assert m.reconcile().state == "ready"
+    assert Identity.load_or_create(tmp_path).pending_index is None
+
+
+def test_pending_receipt_never_adopts_replacement(tmp_path):
+    m, r, p = make(tmp_path)
+    m.identity.parent = "eth0"
+    m.identity.pending_index = 7
+    m.identity.save()
+    r.links.append({"ifname": "zigbee0", "ifindex": 8, "address": m.identity.mac,
+                    "link_index": 1, "linkinfo": {"info_kind": "macvlan", "info_data": {"mode": "bridge"}}})
+    assert m.reconcile().state == "error"
+    assert not r.commands

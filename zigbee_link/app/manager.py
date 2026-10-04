@@ -104,6 +104,12 @@ class InterfaceManager:
             return
         snapshot = read_snapshot(self.runner)
         link = snapshot.link(INTERFACE)
+        if link is None:
+            # A reboot or parent removal can discard the unconfigured candidate.
+            # No network mutation is needed to discard its stale creation receipt.
+            self.identity.pending_index = None
+            self.identity.save()
+            return
         if not self._matches(snapshot, link) or link["ifindex"] != self.identity.pending_index or link.get("ifalias", "") not in ("", self.identity.alias):
             raise NetworkError("Не удалось подтвердить незавершённое создание zigbee0")
         self._validate_extras(snapshot)
