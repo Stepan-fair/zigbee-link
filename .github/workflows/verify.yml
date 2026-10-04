@@ -35,6 +35,8 @@ jobs:
           sudo apparmor_parser -r "$RUNNER_TEMP/zigbee-apparmor"
           mkdir "$RUNNER_TEMP/zigbee-data"
           printf '%s\n' '{"parent":"auto","address":"172.31.254.1/24","coordinators":[],"scan_enabled":false}' > "$RUNNER_TEMP/zigbee-data/options.json"
+          # Supervisor supplies root-owned /data; model that without DAC_OVERRIDE.
+          sudo chown root:root "$RUNNER_TEMP/zigbee-data"
           docker network create --internal --subnet 192.168.50.0/24 zigbee-ci
           docker run -d --name zigbee-radio --network zigbee-ci --ip 192.168.50.22 --cap-drop ALL --cap-add NET_ADMIN zigbee-link:ci sleep 120
           docker exec zigbee-radio ip addr add 172.31.254.2/24 dev eth0
