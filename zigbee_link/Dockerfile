@@ -1,4 +1,4 @@
-FROM ghcr.io/home-assistant/base:2026.08.0
+FROM ghcr.io/home-assistant/base:3.24-2026.08.0
 ARG BUILD_VERSION
 ARG BUILD_ARCH
 LABEL io.hass.version="${BUILD_VERSION}" io.hass.type="app" io.hass.arch="${BUILD_ARCH}"

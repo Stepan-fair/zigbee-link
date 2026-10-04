@@ -57,6 +57,14 @@ from app.arp import ArpProbe
 from app.manager import Identity, InterfaceManager
 class Runner(CommandRunner):
     def classify(self, links): return {{"eth0": "ethernet"}}
+    def run(self, argv):
+        value = super().run(argv)
+        if argv[:5] == ["ip", "-j", "-d", "link", "show"]:
+            links=json.loads(value)
+            for link in links:
+                if link["ifname"] == "eth0": link.pop("linkinfo", None)
+            return json.dumps(links)
+        return value
 # veth models physical Ethernet; actual commands/ARP/kernel remain real.
 runner=Runner()
 identity=Identity.load_or_create(Path({str(directory)!r}))
