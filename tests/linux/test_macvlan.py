@@ -72,7 +72,8 @@ manager=InterfaceManager(parse_settings({{"scan_enabled": False}}), identity, ru
 '''
     env = dict(os.environ, PYTHONPATH=str(ROOT / "zigbee_link"))
     result = subprocess.run(["ip", "netns", "exec", names["h"], sys.executable, "-c", preamble + body], text=True, capture_output=True, env=env)
-    assert result.returncode == 0, result.stdout + result.stderr
+    diagnostic = run("ip", "-n", names["h"], "-j", "-d", "link", "show") if result.returncode else ""
+    assert result.returncode == 0, result.stdout + result.stderr + diagnostic
 
 
 def test_two_coordinators_reachable_via_single_macvlan(lan):
