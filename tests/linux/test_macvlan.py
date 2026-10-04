@@ -166,6 +166,7 @@ def test_unsolicited_ipv6_ra_cannot_add_address_or_route(lan):
     # and directly to the virtual MAC, so a multicast flag alone cannot pass this test.
     mac = __import__("json").loads(run("ip", "-n", names["h"], "-j", "link", "show", "dev", "zigbee0"))[0]["address"]
     run("ip", "netns", "exec", names["h"], "sysctl", "-w", "net.ipv6.conf.zigbee0.accept_ra=1")
+    baseline_routes = __import__("json").loads(run("ip", "-n", names["h"], "-j", "-6", "route", "show", "dev", "zigbee0", "table", "all"))
     script = f'''
 from scapy.all import Ether, IPv6, ICMPv6ND_RA, ICMPv6NDOptPrefixInfo, sendp
 for dst in ("33:33:00:00:00:01", {mac!r}):
@@ -177,7 +178,7 @@ for dst in ("33:33:00:00:00:01", {mac!r}):
 addresses=json.loads(runner.run(["ip","-j","-6","addr","show","dev","zigbee0"]))
 assert all(not record.get("addr_info", []) for record in addresses), addresses
 routes=json.loads(runner.run(["ip","-j","-6","route","show","dev","zigbee0","table","all"]))
-assert not routes, routes
+assert routes == BASELINE_ROUTES, routes
 subprocess.run(["ping","-c","1","-W","2","172.31.254.2"], check=True)
 manager.stop()
-''')
+'''.replace("BASELINE_ROUTES", repr(baseline_routes)))
