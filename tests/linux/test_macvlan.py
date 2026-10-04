@@ -175,7 +175,7 @@ for dst in ("33:33:00:00:00:01", {mac!r}):
     run("ip", "netns", "exec", names["a"], sys.executable, "-c", script)
     inside(lan, '''
 addresses=json.loads(runner.run(["ip","-j","-6","addr","show","dev","zigbee0"]))
-assert not addresses[0]["addr_info"], addresses
+assert all(not record.get("addr_info", []) for record in addresses), addresses
 routes=json.loads(runner.run(["ip","-j","-6","route","show","dev","zigbee0","table","all"]))
 assert not routes, routes
 subprocess.run(["ping","-c","1","-W","2","172.31.254.2"], check=True)
