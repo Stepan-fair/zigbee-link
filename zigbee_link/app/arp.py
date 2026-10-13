@@ -4,6 +4,7 @@ from ipaddress import IPv4Address, IPv4Network
 import socket
 import struct
 import time
+import threading
 
 from .network import NetworkError
 
@@ -58,6 +59,19 @@ class ArpProbe:
         self.clock = clock
         self.wait = wait
         self.cancelled = cancelled
+        self._send_lock = threading.Lock()
+        self._last_send = float("-inf")
+
+    def _send(self, sock, packet):
+        with self._send_lock:
+            delay = 0.1 - (self.clock() - self._last_send)
+            if delay > 0:
+                self.wait(delay)
+            if self.cancelled():
+                return False
+            sock.send(packet)
+            self._last_send = self.clock()
+            return True
 
     def _open(self, interface):
         sock = None
@@ -91,7 +105,8 @@ class ArpProbe:
             for _ in range(3):
                 if self.cancelled():
                     return result
-                sock.send(encode_probe(source_mac, address, IPv4Address("0.0.0.0")))
+                if not self._send(sock, encode_probe(source_mac, address, IPv4Address("0.0.0.0"))):
+                    return result
                 end = self.clock() + 0.4
                 while self.clock() < end:
                     if self.cancelled():
@@ -121,7 +136,8 @@ class ArpProbe:
                     continue
                 if self.cancelled() or self.clock() - started >= 30:
                     return result
-                sock.send(encode_probe(source_mac, target, source_ip))
+                if not self._send(sock, encode_probe(source_mac, target, source_ip)):
+                    return result
                 end = self.clock() + 0.1
                 while self.clock() < end:
                     if self.cancelled():
@@ -136,5 +152,32 @@ class ArpProbe:
             return result
         except OSError as exc:
             raise NetworkError(f"Ошибка ARP-обзора ({type(exc).__name__})") from None
+        finally:
+            sock.close()
+
+    def probe_targets(self, interface: str, source_mac: str, source_ip: IPv4Address, targets: tuple[IPv4Address, ...]) -> ProbeResult:
+        if len(targets) > 253 or len(set(targets)) != len(targets):
+            raise ValueError("Некорректный набор адресов наблюдения")
+        result = ProbeResult({}, False)
+        if not targets:
+            result.complete = True
+            return result
+        sock = self._open(interface)
+        started = self.clock()
+        try:
+            for target in targets:
+                if self.cancelled() or self.clock() - started >= 29:
+                    return result
+                if not self._send(sock, encode_probe(source_mac, target, source_ip)):
+                    return result
+                self._receive(sock, result, source_mac, targets)
+            end = min(started + 30, self.clock() + 0.5)
+            while self.clock() < end and not self.cancelled():
+                self._receive(sock, result, source_mac, targets)
+                self.wait(0.02)
+            result.complete = not self.cancelled()
+            return result
+        except OSError as exc:
+            raise NetworkError(f"Адресный ARP недоступен ({type(exc).__name__})") from None
         finally:
             sock.close()
