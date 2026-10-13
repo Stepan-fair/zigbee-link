@@ -2,10 +2,12 @@
 from contextlib import contextmanager
 from dataclasses import asdict, fields, replace
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
 import threading
+import time
 import uuid
 
 from .model import Action, RecoveryState
@@ -33,6 +35,7 @@ class RecoveryStore:
                 self.db.execute("CREATE TABLE IF NOT EXISTS commands (receipt TEXT PRIMARY KEY, key TEXT NOT NULL, kind TEXT NOT NULL, generation TEXT NOT NULL, created REAL NOT NULL, revision TEXT NOT NULL, run_id TEXT, outcome TEXT NOT NULL)")
                 self.db.execute("CREATE INDEX IF NOT EXISTS command_budget ON commands(key,created)")
                 self.db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+                self.db.execute("CREATE TABLE IF NOT EXISTS incidents (id TEXT PRIMARY KEY,key TEXT NOT NULL,opened REAL NOT NULL,closed REAL,outcome TEXT NOT NULL)")
                 self.db.execute("PRAGMA user_version=1")
         except (sqlite3.Error, OSError, ValueError) as exc:
             if hasattr(self, "db"):
@@ -67,6 +70,15 @@ class RecoveryStore:
                     raise ValueError("invalid stored string")
             elif type(value) not in (int, float):
                 raise ValueError("invalid stored number")
+        counters = ("misses", "successes", "attempt_stage", "health_misses", "last_health_sequence")
+        for name in counters:
+            if type(raw[name]) is not int or not (-1 if name == "last_health_sequence" else 0) <= raw[name] <= 2**31 - 1:
+                raise ValueError("invalid stored counter")
+        if state.attempt_stage > 3:
+            raise ValueError("invalid backoff")
+        for name, value in raw.items():
+            if type(value) in (int, float) and not math.isfinite(value):
+                raise ValueError("non-finite state")
         return state
 
     def load(self, key: str) -> RecoveryState:
@@ -75,6 +87,15 @@ class RecoveryStore:
 
     def _save(self, key, state):
         self.db.execute("INSERT INTO states VALUES (?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload", (key, json.dumps(asdict(state), allow_nan=False)))
+        if state.incident_id:
+            self.db.execute("INSERT OR IGNORE INTO incidents VALUES (?,?,?,NULL,'active')", (state.incident_id, key, self._logical_now()))
+
+    def _logical_now(self):
+        row = self.db.execute("SELECT value FROM meta WHERE key='logical_utc'").fetchone()
+        value = float(row[0]) if row else time.time()
+        if not math.isfinite(value):
+            raise ValueError("invalid logical time")
+        return value
 
     def save(self, key: str, state: RecoveryState):
         with self.transaction():
@@ -122,10 +143,23 @@ class RecoveryStore:
     def prune(self, now_utc: float):
         with self.transaction():
             self.db.execute("DELETE FROM commands WHERE created<? AND outcome!='pending'", (now_utc - 86400 * 31,))
+            self.db.execute("DELETE FROM incidents WHERE closed IS NOT NULL AND id NOT IN (SELECT id FROM incidents WHERE closed IS NOT NULL ORDER BY closed DESC LIMIT 100)")
+
+    def finish_incident(self, key, outcome):
+        if outcome not in ("radio_confirmed", "application_only", "binding_removed"):
+            raise StoreError("Неизвестный исход инцидента")
+        with self.transaction():
+            state = self._load(key)
+            if state.incident_id:
+                self.db.execute("UPDATE incidents SET closed=?,outcome=? WHERE id=? AND key=?", (self._logical_now(), outcome, state.incident_id, key))
+                self._save(key, replace(state, incident_id=""))
 
     def incident_summary(self, key: str) -> dict:
-        state = self.load(key)
-        return {"phase": state.phase, "incident_id": state.incident_id, "pending": bool(state.pending_action)}
+        with self.transaction():
+            state = self._load(key)
+            recent = [{"id": row["id"], "outcome": row["outcome"], "duration": max(0, (row["closed"] if row["closed"] is not None else self._logical_now()) - row["opened"])}
+                      for row in self.db.execute("SELECT * FROM incidents WHERE key=? ORDER BY opened DESC LIMIT 100", (key,))]
+            return {"phase": state.phase, "incident_id": state.incident_id, "pending": bool(state.pending_action), "recent": recent}
 
     def close(self):
         with self.lock:

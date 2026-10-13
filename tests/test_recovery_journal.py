@@ -44,3 +44,15 @@ def test_debug_expires_and_old_details_are_removed(tmp_path):
     assert not j.debug_enabled
     j.emit(SafeEvent("coordinator_absent","172.31.254.2"))
     assert all(json.loads(line)["utc"]>=1000+31*86400 for p in tmp_path.glob("*.jsonl") for line in p.read_text().splitlines())
+
+
+def test_healthy_cycles_are_summarized_but_new_failure_is_not_hidden(tmp_path):
+    now=[1000.0]; j=EventJournal(tmp_path,clock=lambda:now[0])
+    j.emit(SafeEvent("radio_confirmed","172.31.254.2",phase="confirmed",previous="checking"))
+    now[0]+=5
+    j.emit(SafeEvent("radio_confirmed","172.31.254.2",phase="confirmed",previous="confirmed"))
+    assert len((tmp_path/"events.0.jsonl").read_text().splitlines())==1
+    j.emit(SafeEvent("coordinator_absent","172.31.254.2",phase="absent",previous="confirmed"))
+    now[0]+=5
+    j.emit(SafeEvent("coordinator_absent","172.31.254.2",phase="absent",previous="returning"))
+    assert len((tmp_path/"events.0.jsonl").read_text().splitlines())==3

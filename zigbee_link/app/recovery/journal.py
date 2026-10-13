@@ -22,6 +22,9 @@ class SafeEvent:
 
 FACTS = {"misses", "successes", "hour_count", "day_count", "seconds", "health_failures", "next_seconds", "present", "conflict"}
 WAITING = {"coordinator_absent", "network_unavailable", "mqtt_unavailable", "supervisor_unavailable", "permission_unknown", "action_budget", "action_backoff", "measurement_unknown", "radio_not_confirmed"}
+WAITING.update({"radio_confirmed", "scheduler_busy", "disabled", "maintenance", "configuration_error", "address_conflict",
+                "identity_mismatch", "binding_invalid", "command_pending", "app_busy", "return_grace",
+                "app_state_unknown", "clock_untrusted", "startup_or_health_grace"})
 
 
 class EventJournal:
@@ -64,7 +67,7 @@ class EventJournal:
         now = self.clock()
         with self.lock:
             key = (event.network, event.code, event.phase)
-            if event.code in WAITING and 0 <= now - self.last.get(key, float("-inf")) < 300 and not self.debug_enabled:
+            if event.code in WAITING and (not event.previous or event.previous == event.phase) and 0 <= now - self.last.get(key, float("-inf")) < 300 and not self.debug_enabled:
                 return True
             facts = {k: v for k, v in event.facts.items() if k in FACTS and type(v) in (int, bool) and abs(int(v)) <= 10**12}
             self.sequence += 1

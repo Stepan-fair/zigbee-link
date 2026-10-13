@@ -31,6 +31,43 @@ class InstanceLock:
         self.file.close()
 
 
+def make_recovery(raw, settings, identity, probe, data_dir, stopped):
+    from .recovery.settings import parse_recovery
+    config = parse_recovery(raw.get("recovery", {}), settings)
+    log = logging.getLogger("zigbee-link")
+    for key in config.errors:
+        log.warning("Привязка восстановления %s: настройка отклонена", key)
+    if not config.bindings or config.mqtt is None:
+        return None
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        log.warning("Восстановление недоступно: нет доступа к Supervisor; сетевой режим продолжает работу")
+        return None
+    from .recovery.journal import EventJournal
+    from .recovery.mqtt import MqttMonitor
+    from .recovery.service import RecoveryService
+    from .recovery.store import RecoveryStore
+    from .recovery.supervisor import SupervisorClient
+    store = mqtt = None
+    try:
+        store = RecoveryStore(data_dir / "recovery.sqlite")
+        supervisor = SupervisorClient(token, bindings=config.bindings, network_settings=settings)
+        mqtt = MqttMonitor(config.mqtt, config.bindings)
+        targets = lambda ips: probe.probe_targets("zigbee0", identity.mac, settings.address.ip, ips)
+        service = RecoveryService(config, store, supervisor, mqtt, targets,
+                                  EventJournal(data_dir / "diagnostics"), cancelled=stopped.is_set)
+        mqtt.start()
+        return service
+    except Exception as exc:
+        # Recovery must never take down a functioning static network path.
+        log.error("Восстановление не запущено (%s); сетевой режим продолжает работу", type(exc).__name__)
+        if mqtt:
+            mqtt.stop()
+        if store:
+            store.close()
+        return None
+
+
 def main(options_path: Path = Path("/data/options.json"), data_dir: Path = Path("/data")) -> int:
     logging.basicConfig(level=logging.INFO, format="[Zigbee Link] %(message)s")
     log = logging.getLogger("zigbee-link")
@@ -38,8 +75,10 @@ def main(options_path: Path = Path("/data/options.json"), data_dir: Path = Path(
     signal.signal(signal.SIGTERM, lambda *_: stopped.set())
     signal.signal(signal.SIGINT, lambda *_: stopped.set())
     manager = None
+    recovery = None
     try:
-        settings = parse_settings(json.loads(options_path.read_text(encoding="utf-8")))
+        raw = json.loads(options_path.read_text(encoding="utf-8"))
+        settings = parse_settings(raw)
         data_dir.mkdir(parents=True, exist_ok=True)
         with InstanceLock(data_dir):
             identity = Identity.load_or_create(data_dir)
@@ -47,17 +86,30 @@ def main(options_path: Path = Path("/data/options.json"), data_dir: Path = Path(
             snapshot = read_snapshot(runner)
             for link in snapshot.links:
                 log.info("Интерфейс %s: %s, %s", link["ifname"], snapshot.kinds.get(link["ifname"], "виртуальный/неподдерживаемый"), "кабель подключён" if "LOWER_UP" in link.get("flags", []) else "нет соединения")
-            manager = InterfaceManager(settings, identity, runner, ArpProbe(wait=stopped.wait, cancelled=stopped.is_set))
+            probe = ArpProbe(wait=stopped.wait, cancelled=stopped.is_set)
+            manager = InterfaceManager(settings, identity, runner, probe)
+            recovery = make_recovery(raw, settings, identity, probe, data_dir, stopped)
             last = None
             try:
                 while not stopped.is_set():
                     status = manager.reconcile()
+                    if recovery:
+                        try:
+                            recovery.tick(status)
+                        except Exception as exc:
+                            log.error("Контроль восстановления остановлен (%s); сетевой режим продолжает работу", type(exc).__name__)
+                            recovery.close()
+                            recovery = None
                     if status != last:
                         log.info("%s: %s", status.state, status.message)
                         last = status
                     stopped.wait(5 if status.state == "ready" else 15)
             finally:
-                manager.stop()
+                try:
+                    if recovery:
+                        recovery.close()
+                finally:
+                    manager.stop()
         return 0
     except (NetworkError, ValueError, OSError) as exc:
         log.error("Запуск остановлен: %s", exc)

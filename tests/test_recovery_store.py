@@ -67,3 +67,22 @@ def test_store_exception_does_not_include_database_content(tmp_path):
     s=RecoveryStore(tmp_path/"state.sqlite"); s.close()
     with pytest.raises(StoreError) as error: s.load("private-example")
     assert "private-example" not in str(error.value)
+
+
+@pytest.mark.parametrize("field,value",[("successes",1.5),("misses",-1),("next_attempt",float("nan")),("health_misses",True)])
+def test_malformed_numeric_state_is_rejected(tmp_path,field,value):
+    import json
+    path=tmp_path/"state.sqlite"; s=RecoveryStore(path); s.save("a",RecoveryState()); s.close()
+    conn=sqlite3.connect(path); raw=json.loads(conn.execute("SELECT payload FROM states").fetchone()[0]); raw[field]=value
+    conn.execute("UPDATE states SET payload=?",(json.dumps(raw),)); conn.commit(); conn.close()
+    with pytest.raises(StoreError): RecoveryStore(path).load("a")
+
+
+def test_completed_incident_summary_survives_detail_rotation(tmp_path):
+    s=RecoveryStore(tmp_path/"state.sqlite"); s.meta("logical_utc","1000")
+    s.save("a",RecoveryState(phase="absent",incident_id="incident1"))
+    s.meta("logical_utc","2000"); s.finish_incident("a","application_only")
+    assert s.load("a").incident_id==""
+    s.close(); again=RecoveryStore(tmp_path/"state.sqlite")
+    summary=again.incident_summary("a")
+    assert summary["recent"][0]["duration"]==1000 and summary["recent"][0]["outcome"]=="application_only"
