@@ -50,6 +50,7 @@ class Observation:
     radio: bool | None = None
     generation: str = ""
     configuration_error: bool = False
+    health_sequence: int = 0
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,8 @@ class RecoveryState:
     generation: str = ""
     health_misses: int = 0
     last_observation: float = -1
+    last_health_sequence: int = -1
+    run_seen_at: float | None = None
 
 
 @dataclass(frozen=True)
