@@ -89,3 +89,13 @@ def test_one_pending_health_request_per_network():
     m=monitor(); tx=m.request_health("a",0)
     assert m.request_health("a",1)==tx
     assert len(m.client.messages)==1
+
+
+def test_command_outcome_boundary_preserves_new_live_identity_but_not_old_health():
+    m=monitor(); m.invalidate("a")
+    m.receive("z2m/a/bridge/info",json.dumps({"coordinator":{"ieee_address":B.coordinator_ieee},"config":{"serial":{"port":"tcp://172.31.254.2:6638"}}}).encode(),False,1)
+    tx=m.request_health("a",1)
+    m.invalidate_health("a")
+    health(m,tx,2)
+    assert m.snapshot("a",2).identity_match is True
+    assert m.snapshot("a",2).health is None

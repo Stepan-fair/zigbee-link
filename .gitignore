@@ -9,3 +9,6 @@ options.json
 *.key
 *.pem
 PROGRESS.md
+.tools/
+docs/superpowers/
+*.sqlite*

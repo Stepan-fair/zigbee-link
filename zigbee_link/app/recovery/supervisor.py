@@ -1,6 +1,7 @@
 """Fixed-origin Supervisor access. No arbitrary endpoint forwarding."""
 from dataclasses import dataclass, replace
 import json
+import math
 import re
 import time
 from urllib import request, error
@@ -52,6 +53,7 @@ class SupervisorClient:
         self.bindings = tuple(bindings)
         self.network_settings = network_settings
         self.clock = clock
+        self.watchdogs = {}
 
     def _check(self, binding):
         if binding not in self.bindings:
@@ -98,6 +100,43 @@ class SupervisorClient:
             pending.extend(job["child_jobs"])
         return False
 
+    def _watchdog_busy(self, binding, data, state):
+        slug = binding.addon_slug
+        options = data.get("options", {})
+        if state != "started" or (isinstance(options, dict) and not options.get("watchdog")):
+            self.watchdogs.pop(slug, None)
+            return False
+        # Z2M's own retry timer runs inside a started container. Supervisor jobs
+        # alone cannot identify it. Ambiguous logs defer our restart, never race it.
+        try:
+            response = self.transport.request("GET", f"/addons/{slug}/logs/latest?lines=200", timeout=5)
+            if response.status != 200 or len(response.body) > 1024 * 1024:
+                return True
+            text = re.sub(r"\x1b\[[0-9;]*m", "", response.body.decode("utf-8", errors="replace"))
+            markers = [line for line in text.splitlines() if
+                       "WATCHDOG: Waiting " in line or "Starting Zigbee2MQTT " in line or "Zigbee2MQTT started!" in line]
+            if not markers:
+                return True
+            last = markers[-1]
+            if "Zigbee2MQTT started!" in last:
+                self.watchdogs.pop(slug, None)
+                return False
+            token = tuple(markers[-8:])
+            if slug not in self.watchdogs or self.watchdogs[slug][0] != token:
+                wait = re.search(r"WATCHDOG: Waiting ([0-9]+(?:\.[0-9]+)?)min before next start try\.\s*$", last)
+                if wait:
+                    delay = float(wait[1]) * 60
+                    if not math.isfinite(delay) or delay > 31 * 86400:
+                        return True
+                elif "Starting Zigbee2MQTT " in last:
+                    delay = 0
+                else:
+                    return True
+                self.watchdogs[slug] = (token, self.clock() + delay + 180)
+            return self.clock() < self.watchdogs[slug][1]
+        except (OSError, ValueError, TimeoutError):
+            return True
+
     def observe(self, binding):
         self._check(binding)
         data = self._data("GET", f"/addons/{binding.addon_slug}/info")
@@ -110,7 +149,8 @@ class SupervisorClient:
         state = data.get("state")
         state = state if state in ("started", "stopped", "error") else "unknown"
         run_id = data.get("run_id")
-        return AppObservation(True, state, run_id if isinstance(run_id, str) else None, self._busy(binding.addon_slug), valid)
+        busy = self._busy(binding.addon_slug) or self._watchdog_busy(binding, data, state)
+        return AppObservation(True, state, run_id if isinstance(run_id, str) else None, busy, valid)
 
     def command(self, binding, kind):
         self._check(binding)

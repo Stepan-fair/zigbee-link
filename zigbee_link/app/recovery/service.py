@@ -14,6 +14,11 @@ from .radio import RadioVerifier
 from .store import StoreError
 
 LOG = logging.getLogger("zigbee-link")
+PHASE_NAMES = {"observing": "наблюдение", "paused": "пауза обслуживания", "dependency": "ожидание зависимостей",
+               "blocked": "восстановление заблокировано", "checking": "проверка приложения", "suspect": "проверка отсутствия",
+               "absent": "координатор отсутствует", "returning": "проверка возвращения", "waiting": "ожидание повторной попытки",
+               "starting": "запуск приложения", "confirmed": "радиообмен подтверждён", "degraded": "радиопроверка не прошла",
+               "unconfirmed": "приложение отвечает, радиообмен не подтверждён"}
 
 
 class SystemClock:
@@ -70,7 +75,7 @@ class RecoveryService:
         self.journal.emit(SafeEvent(code, key, phase=state.phase, previous=runtime.last_phase,
                                    incident=state.incident_id, action=action, outcome=outcome, facts=facts or {}))
         if runtime.last_phase != state.phase:
-            LOG.info("Сеть %s: %s (%s)", key, state.phase, code)
+            LOG.info("Сеть %s: %s (%s)", key, PHASE_NAMES.get(state.phase, state.phase), code)
             runtime.last_phase = state.phase
 
     def _observe(self, binding):
@@ -115,7 +120,7 @@ class RecoveryService:
             self.mqtt.invalidate(binding.key)
             result = self.supervisor.command(binding, action.kind)
             # Old process replies during the HTTP request cannot resolve its outcome.
-            self.mqtt.invalidate(binding.key)
+            self.mqtt.invalidate_health(binding.key)
             return receipt, result.reason
         except StoreError:
             self.store_available = False

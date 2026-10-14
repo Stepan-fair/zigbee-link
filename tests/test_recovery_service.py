@@ -37,6 +37,7 @@ class Supervisor:
 class Mqtt:
     def __init__(self,s,c): self.s=s; self.c=c; self.epochs={k:"g" for k in s.states}; self.seq={k:0 for k in s.states}; self.health={k:None for k in s.states}; self.connected=True
     def invalidate(self,k): self.epochs[k]+="x"; self.health[k]=None; return self.epochs[k]
+    def invalidate_health(self,k): self.health[k]=None
     def request_health(self,k,now): self.health[k]=self.s.states[k]=="started"; self.seq[k]+=1; return "tx"
     def request_reporting_read(self,*a): return "radio"
     def snapshot(self,k,now): return MqttObservation(self.connected,self.epochs[k],self.health[k],self.seq[k],True,())

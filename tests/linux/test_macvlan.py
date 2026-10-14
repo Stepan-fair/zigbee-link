@@ -87,6 +87,31 @@ assert read_snapshot(runner).link("zigbee0") is None
 ''')
 
 
+def test_targeted_arp_observes_return_without_touching_other_coordinator(lan):
+    inside(lan, '''
+from ipaddress import IPv4Address
+assert manager.reconcile().state == "ready"
+result=manager.probe.probe_targets("zigbee0",identity.mac,IPv4Address("172.31.254.1"),(IPv4Address("172.31.254.2"),IPv4Address("172.31.254.3")))
+assert result.complete and len(result.responders)==2, result
+''')
+    names, _ = lan
+    run("ip", "-n", names["a"], "addr", "del", "172.31.254.2/24", "dev", "eth0")
+    inside(lan, '''
+from ipaddress import IPv4Address
+assert manager.reconcile().state == "ready"
+result=manager.probe.probe_targets("zigbee0",identity.mac,IPv4Address("172.31.254.1"),(IPv4Address("172.31.254.2"),IPv4Address("172.31.254.3")))
+assert result.complete and IPv4Address("172.31.254.2") not in result.responders and IPv4Address("172.31.254.3") in result.responders, result
+''')
+    run("ip", "-n", names["a"], "addr", "add", "172.31.254.2/24", "dev", "eth0")
+    inside(lan, '''
+from ipaddress import IPv4Address
+assert manager.reconcile().state == "ready"
+result=manager.probe.probe_targets("zigbee0",identity.mac,IPv4Address("172.31.254.1"),(IPv4Address("172.31.254.2"),IPv4Address("172.31.254.3")))
+assert result.complete and len(result.responders)==2, result
+manager.stop()
+''')
+
+
 def test_host_ip_collision_prevents_ready(lan):
     names, _ = lan
     run("ip", "-n", names["a"], "addr", "add", "172.31.254.1/24", "dev", "eth0")

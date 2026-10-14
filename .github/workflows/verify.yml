@@ -15,9 +15,9 @@ jobs:
           python-version: '3.12'
       - name: Install test dependencies
         run: |
-          python -m pip install pytest PyYAML scapy
+          python -m pip install pytest PyYAML scapy paho-mqtt==2.1.0
           sudo apt-get update -qq
-          sudo apt-get install -y iproute2 iputils-ping iptables apparmor-utils
+          sudo apt-get install -y iproute2 iputils-ping iptables apparmor-utils mosquitto mosquitto-clients openssl
       - name: Test real Linux networking
         run: sudo "$(which python)" -m pytest tests -q --tb=short
       - name: Check clean distribution
@@ -27,7 +27,7 @@ jobs:
       - name: Validate AppArmor syntax
         run: sudo apparmor_parser -Q zigbee_link/apparmor.txt
       - name: Build amd64 image
-        run: docker build --build-arg BUILD_VERSION=1.1.0 --build-arg BUILD_ARCH=amd64 -t zigbee-link:ci zigbee_link
+        run: docker build --build-arg BUILD_VERSION=1.2.0 --build-arg BUILD_ARCH=amd64 -t zigbee-link:ci zigbee_link
       - name: Verify enforced AppArmor, ARP and clean exit
         run: |
           profile="zigbee_ci_${GITHUB_RUN_ID}"
@@ -63,17 +63,58 @@ jobs:
           docker rm -f zigbee-radio
           docker network rm zigbee-ci
           sudo apparmor_parser -R "$RUNNER_TEMP/zigbee-apparmor"
+      - name: Verify recovery under enforced AppArmor
+        timeout-minutes: 6
+        run: |
+          profile="zigbee_recovery_${GITHUB_RUN_ID}"
+          sed "s/profile zigbee_link /profile $profile /" zigbee_link/apparmor.txt > "$RUNNER_TEMP/recovery-apparmor"
+          sudo apparmor_parser -r "$RUNNER_TEMP/recovery-apparmor"
+          printf '%s\n' 'listener 1883' 'allow_anonymous true' 'persistence false' > "$RUNNER_TEMP/recovery-mosquitto.conf"
+          docker network create --internal --subnet 192.168.51.0/24 zigbee-recovery-ci
+          docker run -d --name recovery-broker --network zigbee-recovery-ci --network-alias broker -v "$RUNNER_TEMP/recovery-mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" eclipse-mosquitto:2
+          docker run -d --name recovery-fixture --network zigbee-recovery-ci --network-alias supervisor --cap-drop ALL --cap-add NET_BIND_SERVICE -v "$PWD/tests/linux/recovery_fixture.py:/fixture.py:ro" --entrypoint python3 zigbee-link:ci -u /fixture.py
+          mkdir "$RUNNER_TEMP/recovery-data"
+          PYTHONPATH=tests/linux python -c 'from recovery_fixture import options; import json,os; from pathlib import Path; Path(os.environ["RUNNER_TEMP"],"recovery-data","options.json").write_text(json.dumps(options()))'
+          sudo chown root:root "$RUNNER_TEMP/recovery-data"
+          docker run -d --name recovery-radio --network zigbee-recovery-ci --ip 192.168.51.22 --cap-drop ALL --cap-add NET_ADMIN zigbee-link:ci sleep 300
+          docker exec recovery-radio ip addr add 172.31.254.2/24 dev eth0
+          docker run -d --name zigbee-recovery-check --network zigbee-recovery-ci --ip 192.168.51.20 --security-opt "apparmor=$profile" --cap-drop ALL --cap-add NET_ADMIN --cap-add NET_RAW -e SUPERVISOR_TOKEN=fixture-token -v "$RUNNER_TEMP/recovery-data:/data" --entrypoint python3 zigbee-link:ci -c 'import app.main as m; from app.network import CommandRunner; import json; class_source="class Runner(CommandRunner):\n def classify(self,links): return {\"eth0\":\"ethernet\"}\n def run(self,args):\n  v=super().run(args)\n  if args[:5]==[\"ip\",\"-j\",\"-d\",\"link\",\"show\"]:\n   records=json.loads(v)\n   for r in records:\n    if r[\"ifname\"]==\"eth0\": r.pop(\"linkinfo\",None)\n   return json.dumps(records)\n  return v"; exec(class_source); m.CommandRunner=Runner; raise SystemExit(m.main())'
+          for i in $(seq 1 45); do
+            if docker exec recovery-fixture python3 -c 'import json,urllib.request; d=json.load(urllib.request.urlopen("http://localhost/fixture/state")); assert d["commands"]==[["net_a_zigbee2mqtt","start"]] and d["radio"]>0' >/dev/null 2>&1; then break; fi
+            sleep 3
+          done
+          docker logs zigbee-recovery-check
+          docker exec recovery-fixture python3 -c 'import json,urllib.request; d=json.load(urllib.request.urlopen("http://localhost/fixture/state")); assert d["commands"]==[["net_a_zigbee2mqtt","start"]] and d["radio"]>0, d'
+          docker exec recovery-radio ip addr add 172.31.254.3/24 dev eth0
+          for i in $(seq 1 45); do
+            if docker exec recovery-fixture python3 -c 'import json,urllib.request; d=json.load(urllib.request.urlopen("http://localhost/fixture/state")); assert len(d["commands"])==2 and d["states"]["net_b_zigbee2mqtt"]=="started"' >/dev/null 2>&1; then break; fi
+            sleep 3
+          done
+          docker exec recovery-fixture python3 -c 'import json,urllib.request; d=json.load(urllib.request.urlopen("http://localhost/fixture/state")); assert d["commands"]==[["net_a_zigbee2mqtt","start"],["net_b_zigbee2mqtt","start"]], d'
+          docker exec recovery-fixture python3 -c 'import json,urllib.request; h={"Authorization":"Bearer fixture-token","Content-Type":"application/json"}; body=json.dumps({"slug":"net_a_zigbee2mqtt"}).encode(); [urllib.request.urlopen(urllib.request.Request("http://localhost/fixture/"+p,data=body,headers=h)).read() for p in ("pause","crash")]'
+          sleep 20
+          docker exec recovery-fixture python3 -c 'import json,urllib.request; d=json.load(urllib.request.urlopen("http://localhost/fixture/state")); assert len(d["commands"])==2 and d["states"]["net_a_zigbee2mqtt"]=="stopped", d'
+          docker exec zigbee-recovery-check python3 -c 'import sqlite3; c=sqlite3.connect("/data/recovery.sqlite"); assert "paused" in c.execute("SELECT payload FROM states WHERE key=?",("172.31.254.2",)).fetchone()[0]'
+          docker exec zigbee-recovery-check python3 -c 'from pathlib import Path; print(Path("/proc/1/attr/current").read_text())' | grep "$profile (enforce)"
+          docker stop -t 45 zigbee-recovery-check
+          test "$(docker inspect -f '{{.State.ExitCode}}' zigbee-recovery-check)" = 0
+          docker rm zigbee-recovery-check
+          docker rm -f recovery-radio recovery-fixture recovery-broker
+          docker network rm zigbee-recovery-ci
+          sudo apparmor_parser -R "$RUNNER_TEMP/recovery-apparmor"
       - name: AppArmor failure diagnostics
         if: failure()
         run: |
           docker logs zigbee-check 2>&1 || true
-          sudo dmesg | grep "zigbee_ci_${GITHUB_RUN_ID}" || true
+          docker logs zigbee-recovery-check 2>&1 || true
+          docker logs recovery-fixture 2>&1 || true
+          sudo dmesg | grep -E "zigbee_(ci|recovery)_${GITHUB_RUN_ID}" || true
   arm64-build:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Build native aarch64 image
-        run: docker build --build-arg BUILD_VERSION=1.1.0 --build-arg BUILD_ARCH=aarch64 -t zigbee-link:arm64 zigbee_link
+        run: docker build --build-arg BUILD_VERSION=1.2.0 --build-arg BUILD_ARCH=aarch64 -t zigbee-link:arm64 zigbee_link
       - name: Verify architecture and Python imports
-        run: docker run --rm --network none --cap-drop ALL --entrypoint python3 zigbee-link:arm64 -c 'import platform; import app.main; assert platform.machine() == "aarch64"'
+        run: docker run --rm --network none --cap-drop ALL --entrypoint python3 zigbee-link:arm64 -c 'import platform,sqlite3,importlib.metadata; import app.main,app.recovery.mqtt; assert platform.machine() == "aarch64"; assert importlib.metadata.version("paho-mqtt") == "2.1.0"'

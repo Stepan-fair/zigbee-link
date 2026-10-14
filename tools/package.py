@@ -16,6 +16,18 @@ ALLOWLIST = (
     "tests/test_arp.py", "tests/test_manager.py", "tests/test_lifecycle.py",
     "tests/test_package.py",
     "tests/linux/test_macvlan.py", ".github/workflows/verify.yml",
+    "zigbee_link/app/recovery/__init__.py", "zigbee_link/app/recovery/model.py",
+    "zigbee_link/app/recovery/settings.py", "zigbee_link/app/recovery/store.py",
+    "zigbee_link/app/recovery/policy.py", "zigbee_link/app/recovery/supervisor.py",
+    "zigbee_link/app/recovery/mqtt.py", "zigbee_link/app/recovery/radio.py",
+    "zigbee_link/app/recovery/journal.py", "zigbee_link/app/recovery/service.py",
+    "tests/test_recovery_settings.py", "tests/test_recovery_store.py",
+    "tests/test_recovery_policy.py", "tests/test_target_probe.py",
+    "tests/test_recovery_supervisor.py", "tests/test_recovery_mqtt.py",
+    "tests/test_recovery_radio.py", "tests/test_recovery_journal.py",
+    "tests/test_recovery_service.py", "tests/test_recovery_main.py",
+    "tests/linux/test_recovery_runtime.py",
+    "tests/linux/recovery_fixture.py",
 )
 
 

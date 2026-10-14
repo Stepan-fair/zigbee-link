@@ -104,6 +104,11 @@ class MqttMonitor:
                     e = self.evidence[pending["key"]]
                     e.update(health=False, health_at=now, sequence=e["sequence"] + 1)
 
+    def invalidate_health(self, key):
+        with self.lock:
+            self.evidence[key].update(health=None, health_at=-1)
+            self.pending = {tx: p for tx, p in self.pending.items() if p["key"] != key or p["kind"] != "health_check"}
+
     def _request(self, key, kind, now, reference=None):
         with self.lock:
             if key not in self.bindings or not self.connected:
