@@ -40,6 +40,16 @@ class Fixture:
                 pass
 
             def do_GET(self):
+                if self.path == "/fixture/drip":
+                    self.send_response(200)
+                    self.send_header("Content-Length", "100")
+                    self.end_headers()
+                    try:
+                        for _ in range(100):
+                            self.wfile.write(b"x"); self.wfile.flush(); time.sleep(.1)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
                 with outer.lock:
                     if self.path == "/fixture/state":
                         return self.send({"states": outer.states, "commands": outer.commands,
@@ -77,6 +87,7 @@ class Fixture:
                             outer.records[slug]["paused"] = True
                         else:
                             outer.states[slug] = "stopped"
+                            outer.client.publish(outer.records[slug]["base_topic"] + "/bridge/state", '{"state":"offline"}')
                         return self.send({"ok": True})
                 _, resource, slug, command = self.path.split("/")
                 with outer.lock:
@@ -85,6 +96,7 @@ class Fixture:
                     outer.states[slug] = "started"
                     outer.commands.append([slug, command])
                     r = outer.records[slug]
+                    outer.client.publish(r["base_topic"] + "/bridge/state", '{"state":"online"}')
                     outer.client.publish(r["base_topic"] + "/bridge/info", json.dumps({"coordinator": {"ieee_address": r["coordinator_ieee"]},
                                          "config": {"serial": {"port": "tcp://" + r["ip"] + ":6638"}}}), retain=True)
                     self.send({"result": "ok", "data": {}})

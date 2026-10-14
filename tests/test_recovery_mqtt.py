@@ -99,3 +99,41 @@ def test_command_outcome_boundary_preserves_new_live_identity_but_not_old_health
     health(m,tx,2)
     assert m.snapshot("a",2).identity_match is True
     assert m.snapshot("a",2).health is None
+
+
+def test_z2m_live_state_boundaries_clear_only_that_networks_evidence():
+    other=replace(B,key="b",ip="172.31.254.3",addon_slug="def_zigbee2mqtt",base_topic="z2m/b")
+    m=MqttMonitor(MqttSettings("mqtt://broker"),(B,other),client=Client()); m.on_connected()
+    info=json.dumps({"coordinator":{"ieee_address":B.coordinator_ieee},"config":{"serial":{"port":"tcp://172.31.254.2:6638"}}}).encode()
+    m.receive("z2m/a/bridge/info",info,False,0)
+    tx=m.request_health("a",0); old=m.snapshot("a",0).generation; untouched=m.snapshot("b",0).generation
+    m.receive("z2m/a/bridge/state",b'{"state":"offline"}',True,1)
+    assert m.snapshot("a",1).generation==old
+    m.receive("z2m/a/bridge/state",b'{"state":"offline"}',False,2)
+    assert m.snapshot("a",2).generation!=old
+    assert m.snapshot("a",2).identity_match is None
+    health(m,tx,3); assert m.snapshot("a",3).health is None
+    offline=m.snapshot("a",3).generation
+    m.receive("z2m/a/bridge/state",b'{"state":"online"}',False,4)
+    assert m.snapshot("a",4).generation!=offline
+    assert m.snapshot("b",4).generation==untouched
+
+
+def test_new_live_identity_invalidates_previous_radio_proof():
+    m=monitor(); info=json.dumps({"coordinator":{"ieee_address":B.coordinator_ieee},"config":{"serial":{"port":"tcp://172.31.254.2:6638"}}}).encode()
+    m.receive("z2m/a/bridge/info",info,False,0)
+    tx=m.request_reporting_read("a",R,0)
+    payload=json.dumps({"transaction":tx,"status":"ok","data":{"id":R.ieee,"endpoint":1,"cluster":"genOnOff","configs":[{"status":0,"direction":0,"attrId":0}]}}).encode()
+    m.receive("z2m/a/bridge/response/device/reporting/read",payload,False,1)
+    assert m.snapshot("a",1).radio_replies
+    m.receive("z2m/a/bridge/info",info,False,2)
+    assert not m.snapshot("a",2).radio_replies
+
+
+def test_old_identity_expires_but_mismatch_does_not_silently_clear():
+    m=monitor(); info=json.dumps({"coordinator":{"ieee_address":B.coordinator_ieee},"config":{"serial":{"port":"tcp://172.31.254.2:6638"}}}).encode()
+    m.receive("z2m/a/bridge/info",info,False,0)
+    assert m.snapshot("a",30*86400).identity_match is None
+    bad=info.replace(B.coordinator_ieee.encode(),b"0x00124b0000000099")
+    m.receive("z2m/a/bridge/info",bad,False,1)
+    assert m.snapshot("a",30*86400).identity_match is False

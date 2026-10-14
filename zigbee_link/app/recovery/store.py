@@ -17,6 +17,10 @@ class StoreError(Exception):
     pass
 
 
+class StateCorruptError(StoreError):
+    """One network payload is invalid; shared database may still be healthy."""
+
+
 class RecoveryStore:
     def __init__(self, path: Path):
         self.lock = threading.RLock()
@@ -55,7 +59,13 @@ class RecoveryStore:
         row = self.db.execute("SELECT payload FROM states WHERE key=?", (key,)).fetchone()
         if row is None:
             return RecoveryState()
-        raw = json.loads(row[0])
+        try:
+            return self._decode_state(row[0])
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise StateCorruptError("Повреждено состояние этой сети; её команды запрещены") from None
+
+    def _decode_state(self, payload):
+        raw = json.loads(payload)
         if not isinstance(raw, dict) or set(raw) != {f.name for f in fields(RecoveryState)}:
             raise ValueError("invalid stored state")
         state = RecoveryState(**raw)

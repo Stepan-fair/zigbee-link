@@ -127,3 +127,43 @@ def test_internal_watchdog_success_releases_wait_without_guessing_health():
     assert c.observe(B).busy
     t.logs += b"[2026-10-14 10:00:00] info: z2m: Zigbee2MQTT started!\n"
     assert not c.observe(B).busy
+
+
+def test_http_transport_deadline_kills_blocked_process_and_hides_token():
+    import subprocess, sys, time
+    from app.recovery.supervisor import HttpTransport
+    processes=[]
+    def factory(args, **kwargs):
+        p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],**kwargs)
+        processes.append(p); return p
+    transport=HttpTransport("private-example",process_factory=factory)
+    start=time.monotonic()
+    try:
+        result=transport.request("GET","/addons/self/info",timeout=.2)
+        assert result.status==503 and "private-example" not in repr(result)
+        assert time.monotonic()-start<1.5
+        assert processes[0].poll() is not None
+    finally:
+        transport.close()
+        for p in processes:
+            if p.poll() is None: p.kill(); p.wait()
+
+
+def test_transport_close_cancels_active_child_and_reaps_it():
+    import subprocess, sys, threading
+    from app.recovery.supervisor import HttpTransport
+    entered=threading.Event(); processes=[]; results=[]
+    def factory(args, **kwargs):
+        p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],**kwargs)
+        processes.append(p); entered.set(); return p
+    transport=HttpTransport("example",process_factory=factory)
+    thread=threading.Thread(target=lambda:results.append(transport.request("GET","/addons/self/info")))
+    thread.start()
+    try:
+        assert entered.wait(1)
+        transport.close(); thread.join(timeout=1)
+        assert not thread.is_alive() and results[0].status==503
+        assert processes[0].poll() is not None and not transport.processes
+        assert transport.request("GET","/addons/self/info").status==503
+    finally:
+        transport.close(); thread.join(timeout=6)

@@ -11,7 +11,7 @@ from .journal import SafeEvent
 from .model import AppObservation, Action, Budget, Observation, RecoveryState
 from .policy import evaluate
 from .radio import RadioVerifier
-from .store import StoreError
+from .store import StoreError, StateCorruptError
 
 LOG = logging.getLogger("zigbee-link")
 PHASE_NAMES = {"observing": "наблюдение", "paused": "пауза обслуживания", "dependency": "ожидание зависимостей",
@@ -49,6 +49,7 @@ class RecoveryService:
         self.runtimes = {b.key: Runtime(b, reference_times={}) for b in config.bindings}
         self.closed = False
         self.store_available = True
+        self.blocked_keys = set()
         self.verifier = RadioVerifier()
         self.arp_at = -100
         self.arp = {}
@@ -65,10 +66,18 @@ class RecoveryService:
         self.last_mono, self.last_wall = mono, wall
         self.clock_guard = mono + (60 if saved is not None else 0)
         for key in self.runtimes:
-            state = store.load(key)
-            remaining = max(60, min(3600, state.next_attempt - state.last_observation)) if state.attempt_stage else 0
-            store.save(key, replace(state, successes=0, misses=0, return_since=None, stable_since=None,
-                                    last_observation=-1, generation="", next_attempt=mono + remaining))
+            try:
+                state = store.load(key)
+                remaining = max(60, min(3600, state.next_attempt - state.last_observation)) if state.attempt_stage else 0
+                store.save(key, replace(state, successes=0, misses=0, return_since=None, stable_since=None,
+                                        last_observation=-1, generation="", next_attempt=mono + remaining))
+            except StateCorruptError:
+                self._quarantine(key)
+
+    def _quarantine(self, key):
+        if key not in self.blocked_keys:
+            self.blocked_keys.add(key)
+            self._emit(key, RecoveryState(phase="blocked"), "state_corrupt")
 
     def _emit(self, key, state, code, action="", outcome="", facts=None):
         runtime = self.runtimes[key]
@@ -85,6 +94,8 @@ class RecoveryService:
     def _dispatch(self, binding, action, revision):
         receipt = None
         try:
+            if binding.key in self.blocked_keys:
+                return None, "state_corrupt"
             controls = self.supervisor.self_controls().get(binding.key)
             app = self.supervisor.observe(binding)
             if not self._authorized(controls, revision, app):
@@ -100,13 +111,15 @@ class RecoveryService:
             current = self.mqtt.snapshot(binding.key, self.clock.monotonic())
             target = IPv4Address(binding.ip)
             presence = self.probe((target,))
-            if not current.connected or not self.network_ready or not presence.complete or len(presence.responders.get(target, set())) != 1:
+            if not current.connected or current.identity_match is False or current.generation != action.generation or not self.network_ready or not presence.complete or len(presence.responders.get(target, set())) != 1:
                 self.store.resolve(receipt, "cancelled", app.run_id)
                 return receipt, "dependency_changed"
             # ARP may have waited for the common packet budget; refresh permission
             # once more after that wait and immediately before the command.
+            app = self.supervisor.observe(binding)
             controls = self.supervisor.self_controls().get(binding.key)
-            if not self._authorized(controls, revision, app) or not self.mqtt.snapshot(binding.key, self.clock.monotonic()).connected:
+            current = self.mqtt.snapshot(binding.key, self.clock.monotonic())
+            if not self._authorized(controls, revision, app) or not current.connected or current.identity_match is False or current.generation != action.generation or not self.network_ready or (action.kind == "start" and app.state not in ("stopped", "error")):
                 self.store.resolve(receipt, "cancelled", app.run_id)
                 return receipt, "cancelled"
             if app.state == "started" and current.health is True:
@@ -122,6 +135,9 @@ class RecoveryService:
             # Old process replies during the HTTP request cannot resolve its outcome.
             self.mqtt.invalidate_health(binding.key)
             return receipt, result.reason
+        except StateCorruptError:
+            self._quarantine(binding.key)
+            return receipt, "state_corrupt"
         except StoreError:
             self.store_available = False
             return receipt, "storage_unavailable"
@@ -158,6 +174,8 @@ class RecoveryService:
                     runtime.next_health = now
                     state = self.store.load(key)
                     self._emit(key, state, "command_result", outcome=value[1])
+            except StateCorruptError:
+                self._quarantine(key)
             except StoreError:
                 self.store_available = False
             except (OSError, ValueError, RuntimeError):
@@ -180,7 +198,7 @@ class RecoveryService:
         if now >= runtime.next_health:
             self.mqtt.request_health(runtime.binding.key, now)
             runtime.next_health = now + 60
-        if runtime.app.state != "started" or current.health is not True or current.identity_match is not True:
+        if runtime.app.state != "started" or current.health is not True or current.identity_match is False:
             return
         references = runtime.binding.references
         if references and now >= runtime.next_radio:
@@ -195,6 +213,12 @@ class RecoveryService:
 
     def _process(self, runtime, now, network_ready):
         key = runtime.binding.key
+        if key in self.blocked_keys:
+            return
+        state = self.store.load(key)
+        mqtt = self.mqtt.snapshot(key, now)
+        if state.generation != mqtt.generation:
+            runtime.next_radio = now
         self._mqtt_poll(runtime, now)
         mqtt = self.mqtt.snapshot(key, now)
         radio = None
@@ -208,7 +232,6 @@ class RecoveryService:
                 break
             radio = False
         responders = self.arp.get(key)
-        state = self.store.load(key)
         pending = self.store.pending(key)
         if pending and key not in self.futures and runtime.app.available and not runtime.app.busy and mqtt.connected:
             if runtime.app.state == "started" and mqtt.health is True:
@@ -224,6 +247,11 @@ class RecoveryService:
         budget = Budget(self.store.command_count(key, self.logical_utc - 3600),
                         self.store.command_count(key, self.logical_utc - 86400), now >= self.clock_guard)
         decision = evaluate(runtime.binding, state, observation, budget, now)
+        if decision.state.phase == "absent" and state.phase != "absent":
+            self.mqtt.invalidate(key)
+            runtime.next_radio = now
+            decision = replace(decision, state=replace(decision.state, generation=self.mqtt.snapshot(key, now).generation,
+                                                       health_misses=0, last_health_sequence=-1))
         if decision.action and (key in self.futures or len(self.futures) >= 4):
             decision = replace(decision, action=None, reason="scheduler_busy",
                                state=replace(decision.state, phase="waiting", next_attempt=state.next_attempt,
@@ -251,6 +279,10 @@ class RecoveryService:
         self.last_mono, self.last_wall = now, wall
         self._collect(now)
         network_ready = network_status.state == "ready"
+        if self.network_ready and not network_ready:
+            for runtime in self.runtimes.values():
+                self.mqtt.invalidate(runtime.binding.key)
+                runtime.next_radio = now
         self.network_ready = network_ready
         if not network_ready:
             self.arp = {}
@@ -262,7 +294,10 @@ class RecoveryService:
             if self.store_available:
                 self.store.meta("logical_utc", str(self.logical_utc))
                 for runtime in self.runtimes.values():
-                    self._process(runtime, now, network_ready)
+                    try:
+                        self._process(runtime, now, network_ready)
+                    except StateCorruptError:
+                        self._quarantine(runtime.binding.key)
         except StoreError:
             self.store_available = False
             LOG.error("Состояние восстановления недоступно; новые команды запрещены")
@@ -284,6 +319,9 @@ class RecoveryService:
         if self.closed:
             return
         self.closed = True
+        cancel_io = getattr(self.supervisor, "close", None)
+        if cancel_io:
+            cancel_io()
         for future, kind in self.futures.values():
             future.cancel()
         self.pool.shutdown(wait=True, cancel_futures=True)

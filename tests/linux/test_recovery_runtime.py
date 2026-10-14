@@ -148,3 +148,37 @@ def test_self_signed_mqtt_certificate_is_rejected(tmp_path):
             monitor.stop()
         process.terminate()
         process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("part", ["headers", "body"])
+def test_supervisor_slow_drip_has_total_deadline(part):
+    import socketserver
+    import sys
+    import threading
+    from app.recovery.supervisor import HttpTransport
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.recv(8192)
+            header=b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"
+            try:
+                if part=="body": self.request.sendall(header)
+                for byte in header if part=="headers" else b"x"*100:
+                    self.request.sendall(bytes([byte])); time.sleep(.1)
+            except OSError:
+                pass
+    server=socketserver.ThreadingTCPServer(("127.0.0.1",0),Handler)
+    server.daemon_threads=True
+    thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
+    origin="http://127.0.0.1:"+str(server.server_address[1])
+    processes=[]
+    def factory(args, **kwargs):
+        code="import app.recovery.supervisor as s; s.ORIGIN="+repr(origin)+"; raise SystemExit(s._http_worker())"
+        p=subprocess.Popen([sys.executable,"-c",code],**kwargs); processes.append(p); return p
+    transport=HttpTransport("fixture-token",process_factory=factory)
+    start=time.monotonic()
+    try:
+        result=transport.request("GET","/addons/self/info",timeout=.4)
+        assert result.status==503 and time.monotonic()-start<2
+        assert processes and processes[0].poll() is not None and not transport.processes
+    finally:
+        transport.close(); server.shutdown(); server.server_close()

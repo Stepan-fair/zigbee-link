@@ -2,7 +2,11 @@
 from dataclasses import dataclass, replace
 import json
 import math
+from pathlib import Path
 import re
+import subprocess
+import sys
+import threading
 import time
 from urllib import request, error
 
@@ -28,23 +32,74 @@ class NoRedirect(request.HTTPRedirectHandler):
 
 
 class HttpTransport:
-    def __init__(self, token):
+    def __init__(self, token, process_factory=subprocess.Popen):
         self._token = token
-        self.opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
+        self.process_factory = process_factory
+        self.lock = threading.RLock()
+        self.processes = set()
+        self.closed = False
 
     def request(self, method, path, body=None, timeout=5):
         if method not in ("GET", "POST") or not path.startswith("/") or "//" in path or ".." in path:
             raise ValueError("Запрещённый запрос Supervisor")
-        req = request.Request("http://supervisor" + path, data=b"{}" if method == "POST" else None,
-                              method=method, headers={"Authorization": "Bearer " + self._token, "Content-Type": "application/json"})
+        process = None
         try:
-            with self.opener.open(req, timeout=timeout) as response:
-                data = response.read(1024 * 1024 + 1)
-                if len(data) > 1024 * 1024:
-                    return HttpResult(502, b"")
-                return HttpResult(response.status, data)
-        except (OSError, error.URLError, ValueError):
+            with self.lock:
+                if self.closed:
+                    return HttpResult(503, b"")
+                # An owned child makes the total deadline cover DNS, slow headers
+                # and slow bodies, not just an individual socket read. No shell,
+                # URL argument or token in argv; credentials travel via stdin.
+                process = self.process_factory([sys.executable, "-m", "app.recovery.supervisor", "--http-worker"],
+                                               cwd=str(Path(__file__).resolve().parents[2]), stdin=subprocess.PIPE,
+                                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self.processes.add(process)
+            payload = json.dumps({"method": method, "path": path, "token": self._token}).encode()
+            output, _ = process.communicate(payload, timeout=min(5, max(.05, timeout)))
+            if process.returncode != 0 or len(output) > 1024 * 1024 + 16:
+                return HttpResult(503, b"")
+            status, data = output.split(b"\n", 1)
+            return HttpResult(int(status), data)
+        except (OSError, ValueError, subprocess.SubprocessError):
             return HttpResult(503, b"")
+        finally:
+            if process is not None:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=1)
+                with self.lock:
+                    self.processes.discard(process)
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            for process in self.processes:
+                if process.poll() is None:
+                    process.kill()
+
+
+ORIGIN = "http://supervisor"
+
+
+def _http_worker():
+    """Private, bounded-output worker; its owner enforces the total deadline."""
+    try:
+        raw = json.loads(sys.stdin.buffer.read(8192))
+        method, path = raw["method"], raw["path"]
+        if method not in ("GET", "POST") or not path.startswith("/") or "//" in path or ".." in path:
+            return 1
+        req = request.Request(ORIGIN + path, data=b"{}" if method == "POST" else None, method=method,
+                              headers={"Authorization": "Bearer " + raw["token"], "Content-Type": "application/json"})
+        opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
+        with opener.open(req, timeout=5) as response:
+            data = response.read(1024 * 1024 + 1)
+            status = response.status
+            if len(data) > 1024 * 1024:
+                status, data = 502, b""
+            sys.stdout.buffer.write(str(status).encode() + b"\n" + data)
+            return 0
+    except (OSError, error.URLError, ValueError, KeyError, TypeError):
+        return 1
 
 
 class SupervisorClient:
@@ -54,6 +109,11 @@ class SupervisorClient:
         self.network_settings = network_settings
         self.clock = clock
         self.watchdogs = {}
+
+    def close(self):
+        close = getattr(self.transport, "close", None)
+        if close:
+            close()
 
     def _check(self, binding):
         if binding not in self.bindings:
@@ -173,3 +233,7 @@ class SupervisorClient:
             return sorted({code for marker, code in signatures.items() if marker in text})
         except (OSError, ValueError, TimeoutError):
             return []
+
+
+if __name__ == "__main__":
+    raise SystemExit(_http_worker() if sys.argv[1:] == ["--http-worker"] else 1)

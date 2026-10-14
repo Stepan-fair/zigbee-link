@@ -42,9 +42,9 @@ class MqttMonitor:
         self.connected = False
         self.pending = {}
         self.epochs = {b.key: uuid.uuid4().hex for b in bindings}
-        self.evidence = {b.key: {"health": None, "health_at": -1, "sequence": 0, "identity": None, "radio": deque(maxlen=2)} for b in bindings}
+        self.evidence = {b.key: {"health": None, "health_at": -1, "sequence": 0, "identity": None, "identity_at": -1, "radio": deque(maxlen=2)} for b in bindings}
         self.topics = {b.base_topic + "/bridge/" + suffix: (b.key, suffix) for b in bindings for suffix in (
-            "info", "response/health_check", "response/device/reporting/read")}
+            "info", "state", "response/health_check", "response/device/reporting/read")}
         client.username_pw_set(settings.username or None, settings.password or None)
         client.reconnect_delay_set(min_delay=1, max_delay=60)
         client.max_queued_messages_set(512)
@@ -91,7 +91,7 @@ class MqttMonitor:
         with self.lock:
             self.epochs[key] = uuid.uuid4().hex
             e = self.evidence[key]
-            e.update(health=None, health_at=-1, identity=None)
+            e.update(health=None, health_at=-1, identity=None, identity_at=-1)
             e["radio"].clear()
             self.pending = {tx: p for tx, p in self.pending.items() if p["key"] != key}
             return self.epochs[key]
@@ -157,6 +157,10 @@ class MqttMonitor:
                 return
             self._expire(now)
             key, suffix = self.topics[topic]
+            if suffix == "state":
+                if not retained and raw.get("state") in ("online", "offline"):
+                    self.invalidate(key)
+                return
             if suffix == "info":
                 if retained:
                     return
@@ -170,7 +174,11 @@ class MqttMonitor:
                     match = ieee.lower() == self.bindings[key].coordinator_ieee and urlsplit(port).hostname == self.bindings[key].ip
                 except ValueError:
                     match = False
-                self.evidence[key]["identity"] = match
+                # Even unchanged info may follow an independent Z2M restart.
+                # Require another radio exchange instead of reusing its old proof.
+                self.evidence[key]["radio"].clear()
+                self.pending = {tx: p for tx, p in self.pending.items() if p["key"] != key or p["kind"] != "device/reporting/read"}
+                self.evidence[key].update(identity=match, identity_at=now)
                 return
             tx = raw.get("transaction")
             if retained or not isinstance(tx, str) or tx not in self.pending:
@@ -195,5 +203,6 @@ class MqttMonitor:
             self._expire(now)
             e = self.evidence[key]
             health = e["health"] if 0 <= now - e["health_at"] <= 90 else None
+            identity = e["identity"] if e["identity"] is False or 0 <= now - e["identity_at"] <= 900 else None
             return MqttObservation(self.connected, self.epochs[key], health, e["sequence"],
-                                   e["identity"], tuple(e["radio"]))
+                                   identity, tuple(e["radio"]))
