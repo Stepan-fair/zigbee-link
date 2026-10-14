@@ -99,6 +99,7 @@ jobs:
           docker exec recovery-fixture python3 -c 'import json,urllib.request; d=json.load(urllib.request.urlopen("http://localhost/fixture/state")); assert len(d["commands"])==2 and d["states"]["net_a_zigbee2mqtt"]=="stopped", d'
           docker exec zigbee-recovery-check python3 -c 'import sqlite3; c=sqlite3.connect("/data/recovery.sqlite"); assert "paused" in c.execute("SELECT payload FROM states WHERE key=?",("172.31.254.2",)).fetchone()[0]'
           docker exec zigbee-recovery-check python3 -c 'import time; from app.recovery.supervisor import HttpTransport; t=HttpTransport("fixture-token"); start=time.monotonic(); r=t.request("GET","/fixture/drip",timeout=.5); assert r.status==503 and time.monotonic()-start<2 and not t.processes; t.close()'
+          docker exec recovery-fixture python3 -c 'import json,urllib.request; assert json.load(urllib.request.urlopen("http://localhost/fixture/state"))["drip"]==1'
           docker exec zigbee-recovery-check python3 -c 'from pathlib import Path; print(Path("/proc/1/attr/current").read_text())' | grep "$profile (enforce)"
           docker stop -t 45 zigbee-recovery-check
           test "$(docker inspect -f '{{.State.ExitCode}}' zigbee-recovery-check)" = 0

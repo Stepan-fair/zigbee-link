@@ -27,6 +27,7 @@ class Fixture:
         self.commands = []
         self.health_requests = 0
         self.radio_requests = 0
+        self.drip_requests = 0
         self.lock = threading.RLock()
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="zigbee-fixture")
         self.client.on_connect = lambda c, u, f, r, p: c.subscribe("z2m/+/bridge/request/#")
@@ -41,6 +42,8 @@ class Fixture:
 
             def do_GET(self):
                 if self.path == "/fixture/drip":
+                    with outer.lock:
+                        outer.drip_requests += 1
                     self.send_response(200)
                     self.send_header("Content-Length", "100")
                     self.end_headers()
@@ -53,7 +56,7 @@ class Fixture:
                 with outer.lock:
                     if self.path == "/fixture/state":
                         return self.send({"states": outer.states, "commands": outer.commands,
-                                          "health": outer.health_requests, "radio": outer.radio_requests})
+                                          "health": outer.health_requests, "radio": outer.radio_requests, "drip": outer.drip_requests})
                     if self.path == "/fixture/options":
                         return self.send(outer.options)
                     if self.headers.get("Authorization") != "Bearer fixture-token":

@@ -156,9 +156,11 @@ def test_supervisor_slow_drip_has_total_deadline(part):
     import sys
     import threading
     from app.recovery.supervisor import HttpTransport
+    entered=threading.Event()
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
             self.request.recv(8192)
+            entered.set()
             header=b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"
             try:
                 if part=="body": self.request.sendall(header)
@@ -178,7 +180,7 @@ def test_supervisor_slow_drip_has_total_deadline(part):
     start=time.monotonic()
     try:
         result=transport.request("GET","/addons/self/info",timeout=.4)
-        assert result.status==503 and time.monotonic()-start<2
+        assert entered.is_set() and result.status==503 and time.monotonic()-start<2
         assert processes and processes[0].poll() is not None and not transport.processes
     finally:
         transport.close(); server.shutdown(); server.server_close()
