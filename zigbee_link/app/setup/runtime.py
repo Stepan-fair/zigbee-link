@@ -203,7 +203,7 @@ class SetupController:
                 raise ValueError("candidate_not_ready")
             fields = deepcopy(candidate.fields)
             trial = NetworkRecord("trial", "trial", fields, False, False, True)
-            accepted = not self._valid(trial) and candidate.match_kind == "matched" and not (set(candidate.issues) - NONBLOCKING)
+            accepted = not self._valid(trial) and candidate.match_kind == "verified" and not (set(candidate.issues) - NONBLOCKING)
             broker_id = snapshot.broker.identity if snapshot.broker else "unconfigured"
             ieee = fields.get("coordinator_ieee")
             slug = fields.get("addon_slug")
@@ -372,7 +372,9 @@ class SetupController:
             coordinators = tuple(Coordinator(r.fields.get("name", FieldValue("auto", "Zigbee", "", 0, "")).value or "Zigbee",
                                              IPv4Address(r.fields["ip"].value)) for r in snapshot.networks
                                  if r.accepted and not r.tombstoned and not self._valid(r))
-            return replace(self.settings, coordinators=coordinators)
+            combined = {coordinator.address: coordinator for coordinator in self.settings.coordinators}
+            combined.update({coordinator.address: coordinator for coordinator in coordinators})
+            return replace(self.settings, coordinators=tuple(combined.values()))
 
     def request_scan(self):
         with self.lock:
@@ -481,11 +483,18 @@ class SetupController:
                 if self.service and record.state_key in self.service.runtimes:
                     state = self.recovery_store.load(record.state_key)
                     row["phase"] = state.phase
-                    row["radio"] = "confirmed" if state.phase == "confirmed" else "application_only"
+                    from ..recovery.radio import RadioVerifier
+                    runtime = self.service.runtimes[record.state_key]
+                    current = self.service.mqtt.snapshot(record.state_key, self.clock.monotonic())
+                    live = current.connected and current.health is True and current.identity_match is True and current.generation == state.generation
+                    radio = live and any(RadioVerifier().validate(reference, reply, current.generation, self.clock.monotonic()).confirmed
+                                         for reference in runtime.binding.references for reply in current.radio_replies)
+                    row["radio"] = "confirmed" if state.phase == "confirmed" and radio else "application_only" if live else "unconfirmed"
                 networks.append(row)
             status = self.network_status
             network = {"address": str(self.settings.address), "parent": status.parent if status and hasattr(status, "parent") else self.settings.parent,
-                       "state": status.state if status else "unknown"}
+                       "state": status.state if status else "unknown",
+                       "manual_unbound_ips": [str(c.address) for c in self.settings.coordinators if self.mode == "guided" and str(c.address) not in {b.ip for b in config.bindings}]}
             broker = None if not snapshot.broker else {"mode": snapshot.broker.mode, "server": snapshot.broker.server,
                 "provider_slug": snapshot.broker.provider_slug, "configured": config.mqtt is not None,
                 "credentials_saved": bool(snapshot.broker.secret_ref)}

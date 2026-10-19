@@ -72,6 +72,7 @@ function renderState(next) {
   $('global-control').replaceChildren(check('Разрешить восстановление', next.readiness.enabled, value => submitChange('networks/control', {network_id: null, enabled: value, expected_revision: state.revision}), !guided()));
   $('network-title').textContent = next.network.state === 'ready' ? 'Интерфейс готов' : next.network.state === 'unknown' ? 'Состояние ещё не получено' : 'Проверьте подключение';
   $('network-detail').textContent = (next.network.parent || 'auto') + ' → zigbee0 · ' + next.network.address;
+  if (next.network.manual_unbound_ips?.length) $('network-detail').textContent += ' · Отдельно для диагностики: ' + next.network.manual_unbound_ips.join(', ');
   $('broker-title').textContent = next.broker?.configured ? 'Брокер настроен' : 'MQTT ещё не настроен';
   $('broker-detail').textContent = next.broker ? (next.broker.mode === 'auto' ? 'Найден в Home Assistant · ' : 'Указан вручную · ') + next.broker.server : 'Попробуем получить сведения из службы Home Assistant.';
   const modeText = el('div');
@@ -110,7 +111,7 @@ function renderNetwork(record) {
 }
 function renderCandidate(candidate) {
   const card = el('article', undefined, 'card');
-  const ready = candidate.match_kind === 'matched' && candidate.issues.every(i => i === 'radio_reference_unavailable');
+  const ready = candidate.match_kind === 'verified' && candidate.issues.every(i => i === 'radio_reference_unavailable');
   card.append(el('h3', fieldValue(candidate, 'name') || 'Найденная сеть'), el('p', fieldValue(candidate, 'ip') || 'IP не определён', 'address'), el('p', fieldValue(candidate, 'addon_slug') || 'Приложение требует выбора'), el('p', ready ? 'Сведения однозначно сопоставлены. Можно добавить для наблюдения.' : 'Сведения неполные или противоречат друг другу. Проверьте привязку вручную.'));
   const action = button(ready ? 'Добавить для наблюдения' : 'Проверить привязку', async () => {
     const before = new Set(state.networks.map(n => n.network_id));

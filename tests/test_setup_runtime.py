@@ -14,7 +14,7 @@ from test_recovery_service import Clock
 def candidate(ip="172.31.254.2", slug="a_zigbee2mqtt", ieee="0x0000000000000001", topic="floor/a"):
     values = dict(name="Сеть A", ip=ip, serial_port=6638, addon_slug=slug,
                   base_topic=topic, coordinator_ieee=ieee, references=[])
-    return Candidate(slug, {k: FieldValue("auto", v, "bridge_retained", 1000, "found") for k, v in values.items()}, (), "matched")
+    return Candidate(slug, {k: FieldValue("auto", v, "bridge_retained", 1000, "found") for k, v in values.items()}, (), "verified")
 
 
 def controller(tmp_path, *, options=None):

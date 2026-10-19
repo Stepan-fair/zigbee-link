@@ -32,3 +32,8 @@ def test_observation_does_not_claim_confirmed_application_health():
     script = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "подтверждена только работа приложения" not in script
     assert "радиообмен не проверяется" in script
+
+
+def test_ui_recognizes_the_real_verified_matcher_result():
+    script = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "candidate.match_kind === 'verified'" in script

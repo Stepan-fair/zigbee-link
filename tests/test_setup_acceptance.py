@@ -104,3 +104,43 @@ def test_incomplete_network_cannot_enable_management(tmp_path):
     with pytest.raises(ValueError):
         ctl.control(record.network_id, managed=True, expected_revision=snapshot.revision)
     ctl.close()
+
+
+def test_guided_observation_preserves_manual_diagnostic_addresses(tmp_path):
+    options = {"address": "172.31.254.1/24", "coordinators": [{"name": "Manual diagnostic", "ip": "172.31.254.4"}]}
+    ctl, _, _ = controller(tmp_path, options=options)
+    snapshot, record = accept_one(ctl)
+    transition = ctl.prepare_transition("guided", expected_revision=snapshot.revision)
+    assert ctl.commit_transition(transition.receipt)
+    assert {str(c.address) for c in ctl.effective_settings().coordinators} == {"172.31.254.2", "172.31.254.4"}
+    assert ctl.view().network["manual_unbound_ips"] == ["172.31.254.4"]
+    ctl.close()
+
+
+def test_view_does_not_reuse_confirmed_phase_after_mqtt_disconnect(tmp_path):
+    from types import SimpleNamespace
+    from app.recovery.model import RecoveryState, Binding
+    from app.recovery.mqtt import MqttObservation
+    ctl, _, _ = controller(tmp_path)
+    snapshot, record = accept_one(ctl)
+    binding = Binding(record.state_key, "172.31.254.2", "a_zigbee2mqtt", "floor/a", "0x0000000000000001")
+    ctl.recovery_store.save(record.state_key, RecoveryState(phase="confirmed", generation="g"))
+    ctl.service = SimpleNamespace(runtimes={record.state_key: SimpleNamespace(binding=binding)},
+                                 mqtt=SimpleNamespace(snapshot=lambda key, now: MqttObservation(False, "g", True, 1, True, ())))
+    try:
+        assert ctl.view().networks[0]["radio"] != "confirmed"
+    finally:
+        ctl.service = None
+        ctl.close()
+
+
+def test_matcher_output_is_accepted_for_observation_without_manual_confirmation(tmp_path):
+    from app.setup.matching import match_networks
+    from test_setup_matching import A, BA, BROKER
+    ctl, _, _ = controller(tmp_path)
+    candidates = match_networks((A,), (BA,), broker=BROKER, subnet=ctl.settings.address.network)
+    assert len(candidates) == 1
+    catalog = ctl.store.save_catalog(Catalog(candidates=tuple(candidates)), expected_revision=0)
+    snapshot = ctl.accept(candidates[0].candidate_id, catalog_revision=catalog.revision, expected_revision=0)
+    assert snapshot.networks[0].accepted and not snapshot.networks[0].managed
+    ctl.close()

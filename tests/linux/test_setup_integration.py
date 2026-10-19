@@ -46,7 +46,7 @@ def test_real_retained_discovery_two_networks_zero_publish(tmp_path, broker):
         now[0] += 31
         discovery.tick()
         catalog = store.catalog()
-        assert len(catalog.candidates) == 2 and all(c.match_kind == "matched" for c in catalog.candidates)
+        assert len(catalog.candidates) == 2 and all(c.match_kind == "verified" for c in catalog.candidates)
         assert not catalog.candidates[0].fields["references"].value
         assert len(catalog.candidates[1].fields["references"].value) == 1
         assert not fixture.commands and not fixture.all_requests

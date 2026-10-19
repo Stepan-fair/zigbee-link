@@ -40,7 +40,7 @@ def sample(suffix, name, *, incomplete=False):
     values = dict(name=name, ip=f"172.31.254.{suffix}", serial_port=6638, addon_slug=f"net_{suffix}_zigbee2mqtt",
                   base_topic=f"floor/{suffix}", coordinator_ieee="" if incomplete else "0x" + f"{suffix:016x}", references=[])
     return Candidate(str(suffix), {key: FieldValue("auto", value, "supervisor", 1792400400, "found") for key, value in values.items()},
-                     ("identity_incomplete",) if incomplete else (), "proposed" if incomplete else "matched")
+                     ("identity_incomplete",) if incomplete else (), "proposed" if incomplete else "verified")
 
 
 def build_controller(data_dir):
