@@ -130,7 +130,8 @@ class SetupController:
                         raise ValueError("identity_confirmation_required")
                     fields[name] = FieldValue(change["mode"], value, "manual" if change["mode"] == "manual" else (old.source if old else "manual"),
                                               self.clock.time(), "accepted")
-                edited = replace(record, fields=fields, issues=())
+                accepted = record.accepted or confirm_identity
+                edited = replace(record, fields=fields, issues=() if accepted else record.issues, accepted=accepted)
                 if confirm_identity and snapshot.broker:
                     # Alias mutation and settings CAS are in the same transaction.
                     bound = self.store.bind_alias(record.network_id,
@@ -196,18 +197,20 @@ class SetupController:
             if type(catalog_revision) is not int or catalog.revision != catalog_revision:
                 raise RevisionConflict("catalog_revision_conflict")
             candidate = next((c for c in catalog.candidates if c.candidate_id == candidate_id), None)
-            if candidate is None or candidate.match_kind != "matched" or set(candidate.issues) - NONBLOCKING:
+            if candidate is None:
                 raise ValueError("candidate_not_ready")
             fields = deepcopy(candidate.fields)
             trial = NetworkRecord("trial", "trial", fields, False, False, True)
-            if self._valid(trial):
-                raise ValueError("candidate_not_ready")
+            accepted = not self._valid(trial) and candidate.match_kind == "matched" and not (set(candidate.issues) - NONBLOCKING)
             broker_id = snapshot.broker.identity if snapshot.broker else "unconfigured"
-            network_id, state_key = self.store.state_key((broker_id, fields["coordinator_ieee"].value), addon_slug=fields["addon_slug"].value)
+            ieee = fields.get("coordinator_ieee")
+            slug = fields.get("addon_slug")
+            network_id, state_key = self.store.state_key((broker_id, ieee.value if ieee and ieee.value else "candidate:" + candidate_id),
+                                                        addon_slug=slug.value if slug and slug.value else None)
             old = next((r for r in snapshot.networks if r.network_id == network_id), None)
             if old and not old.tombstoned:
                 raise ValueError("network_already_accepted")
-            record = NetworkRecord(network_id, state_key, fields, False, False, True)
+            record = NetworkRecord(network_id, state_key, fields, False, False, accepted, issues=() if accepted else candidate.issues)
             records = tuple(r for r in snapshot.networks if r.network_id != network_id) + (record,)
             return self._save(replace(snapshot, networks=records), expected_revision, code="setup_accept")
 

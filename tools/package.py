@@ -39,6 +39,8 @@ ALLOWLIST = (
     "tests/test_setup_supervisor.py", "tests/test_setup_matching.py", "tests/test_setup_mqtt.py",
     "tests/test_setup_service.py", "tests/test_setup_runtime.py", "tests/test_setup_migration.py",
     "tests/test_setup_journal.py", "tests/test_setup_web.py", "tests/test_setup_web_security.py",
+    "zigbee_link/app/web/static/index.html", "zigbee_link/app/web/static/app.js",
+    "zigbee_link/app/web/static/app.css", "tools/setup_ui_fixture.py", "tests/test_setup_ui_contract.py",
 )
 
 

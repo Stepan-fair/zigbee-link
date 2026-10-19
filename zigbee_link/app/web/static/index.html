@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Zigbee Link — сети координаторов</title>
+  <link rel="stylesheet" href="./static/app.css">
+  <script src="./static/app.js" defer></script>
+</head>
+<body>
+<main>
+  <header class="page-head"><div><div class="eyebrow">HOME ASSISTANT · ZIGBEE LINK</div><h1>Сети координаторов</h1><p>Подключение, наблюдение и восстановление в одном месте.</p></div><span class="version">1.3 · предварительный выпуск</span></header>
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  <section id="mode" class="mode-banner" aria-label="Источник настроек"></section>
+  <section class="summary" aria-label="Готовность восстановления"><div><span>Разрешён</span><strong id="enabled">—</strong></div><div><span>Настроен</span><strong id="configured">—</strong></div><div><span>Управляет</span><strong id="managed">0 сетями</strong></div><div class="summary-control" id="global-control"></div></section>
+  <section class="connections" aria-label="Подключение"><article class="connection"><span class="eyebrow">ETHERNET / ZIGBEE0</span><h2 id="network-title">Проверяем интерфейс</h2><p id="network-detail">Получаем сведения…</p></article><article class="connection"><span class="eyebrow">MQTT</span><h2 id="broker-title">Проверяем брокер</h2><p id="broker-detail">Получаем сведения…</p><button id="broker-open" class="text-button" type="button">Исправить MQTT</button></article></section>
+  <div class="section-head"><div><h2>Ваши сети</h2><p>Каждый координатор связан со своим экземпляром Zigbee2MQTT.</p></div><div class="actions"><button id="scan" type="button">Найти сети</button><a class="button secondary" href="./api/diagnostics" download>Скачать диагностику</a></div></div>
+  <section id="networks" class="cards" aria-label="Добавленные сети"></section>
+  <section id="found-section"><div class="section-head"><div><h2>Найдено в Home Assistant</h2><p>Добавление включает наблюдение. Управление вы разрешаете отдельно.</p></div></div><div id="candidates" class="cards" aria-label="Найденные сети"></div></section>
+  <footer>IP задаётся в самом координаторе. Zigbee Link не меняет DHCP, адреса устройств или настройки роутера.</footer>
+</main>
+<dialog id="editor" aria-labelledby="editor-title"><form id="edit-form"><div class="dialog-head"><h2 id="editor-title">Исправить сеть</h2><button type="button" class="close" data-close="editor" aria-label="Закрыть исправление">×</button></div><p>Ручные значения сохраняются после поиска и перезапуска.</p><div id="edit-fields"></div><label class="check"><input id="confirm-identity" type="checkbox">Подтверждаю привязку к указанному координатору и приложению</label><p id="edit-error" class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" id="editor-refresh" class="secondary">Сверить с новой версией</button><button type="submit">Сохранить исправления</button></div></form></dialog>
+<dialog id="broker-editor" aria-labelledby="broker-editor-title"><form id="broker-form"><div class="dialog-head"><h2 id="broker-editor-title">Брокер MQTT</h2><button type="button" class="close" data-close="broker-editor" aria-label="Закрыть MQTT">×</button></div><label>Источник<select id="broker-mode"><option value="auto">Автоматически из Home Assistant</option><option value="manual">Указать вручную</option></select></label><div id="broker-manual"><label>Адрес брокера<input id="broker-server" type="text" placeholder="mqtts://broker.example:8883" maxlength="300"></label><label>Имя пользователя<input id="broker-user" type="text" autocomplete="off" maxlength="1024"></label><label>Пароль<input id="broker-password" type="password" autocomplete="new-password" maxlength="1024" placeholder="Пустое поле сохраняет прежний пароль"></label><label class="check"><input id="broker-clear" type="checkbox">Очистить сохранённый пароль</label></div><p>Служебные пароли Home Assistant не отображаются. При смене адреса прежние данные не переносятся.</p><p id="broker-error" class="form-error" role="alert"></p><div class="dialog-actions"><button type="submit">Сохранить MQTT</button></div></form></dialog>
+<dialog id="migration" aria-labelledby="migration-title"><div class="dialog-head"><h2 id="migration-title">Переход настроек</h2><button type="button" class="close" data-close="migration" aria-label="Закрыть переход">×</button></div><div id="migration-preview"></div><p id="migration-error" class="form-error" role="alert"></p><div class="dialog-actions"><button id="migration-commit" type="button">Подтвердить переход</button></div></dialog>
+</body>
+</html>

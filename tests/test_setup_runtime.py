@@ -110,9 +110,19 @@ def test_unknown_identity_does_not_restart_healthy_app(tmp_path):
     ctl, _, _ = controller(tmp_path)
     invalid = candidate(ieee="")
     cat = ctl.store.save_catalog(Catalog(candidates=(invalid,)), expected_revision=0)
-    with pytest.raises(ValueError):
-        ctl.accept(invalid.candidate_id, catalog_revision=cat.revision, expected_revision=0)
-    assert not ctl.store.snapshot().networks
+    snapshot = ctl.accept(invalid.candidate_id, catalog_revision=cat.revision, expected_revision=0)
+    assert not snapshot.networks[0].accepted and not snapshot.networks[0].managed
+    assert not ctl.configuration().bindings
+    ctl.close()
+
+
+def test_incomplete_proposal_can_be_corrected_without_granting_automatic_rights(tmp_path):
+    ctl, _, _ = controller(tmp_path)
+    item = replace(candidate(ieee=""), match_kind="proposed", issues=("identity_incomplete",))
+    snapshot, record = accept_one(ctl, item)
+    assert not record.accepted and not record.managed
+    snapshot = ctl.edit(record.network_id, {"coordinator_ieee": {"mode": "manual", "value": "0x0000000000000001"}}, expected_revision=snapshot.revision, confirm_identity=True)
+    assert snapshot.networks[0].accepted and not snapshot.networks[0].managed
     ctl.close()
 
 
