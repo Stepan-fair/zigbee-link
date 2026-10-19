@@ -32,7 +32,7 @@ def accept_one(ctl, item=None):
     item = item or candidate()
     cat = ctl.store.save_catalog(Catalog(candidates=(item,)), expected_revision=ctl.store.catalog().revision)
     snapshot = ctl.accept(item.candidate_id, catalog_revision=cat.revision, expected_revision=ctl.store.snapshot().revision)
-    return snapshot, snapshot.networks[-1]
+    return snapshot, next(record for record in snapshot.networks if record.fields["addon_slug"].value == item.fields["addon_slug"].value)
 
 
 def test_accept_defaults_observation_manual_pins_and_stale_edit(tmp_path):

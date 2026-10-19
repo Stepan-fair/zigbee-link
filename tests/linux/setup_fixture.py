@@ -56,10 +56,10 @@ class SetupFixture(Fixture):
     def publish_metadata(self):
         for index, record in enumerate(self.records.values()):
             self.client.publish(record["base_topic"] + "/bridge/info", json.dumps({"coordinator": {"ieee_address": record["coordinator_ieee"]},
-                "config": {"serial": {"port": "tcp://" + record["ip"] + ":6638"}, "mqtt": {"server": f"mqtt://{self.broker_host}:{self.broker_port}"}}}), retain=True)
+                "config": {"serial": {"port": "tcp://" + record["ip"] + ":6638"}, "mqtt": {"server": f"mqtt://{self.broker_host}:{self.broker_port}"}}}), qos=1, retain=True).wait_for_publish(timeout=2)
             devices = [] if index == 0 else [{"ieee_address": "0x0000000000000012", "type": "Router", "interview_completed": True,
                 "disabled": False, "power_source": "Mains (single phase)", "endpoints": {"1": {"clusters": {"input": ["genOnOff"]}}}}]
-            self.client.publish(record["base_topic"] + "/bridge/devices", json.dumps(devices), retain=True)
+            self.client.publish(record["base_topic"] + "/bridge/devices", json.dumps(devices), qos=1, retain=True).wait_for_publish(timeout=2)
 
 
 def api(origin, path, payload=None, token=None, user=True):
