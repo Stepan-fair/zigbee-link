@@ -33,8 +33,10 @@ def check_distribution(root: Path, forbidden: tuple[str, ...] = ()) -> list[str]
         m = yaml.safe_load((root / "zigbee_link/config.yaml").read_text(encoding="utf-8"))
         if repo.get("name") != "Zigbee Link" or m.get("slug") != "zigbee_link":
             errors.append("Invalid repository/app identity")
-        if m.get("options") != {"parent": "auto", "address": "172.31.254.1/24", "coordinators": [], "scan_enabled": True, "recovery": {"enabled": False, "mqtt": {}, "networks": []}}:
+        if m.get("options") != {"configuration_mode": "legacy", "parent": "auto", "address": "172.31.254.1/24", "coordinators": [], "scan_enabled": True, "recovery": {"enabled": False, "mqtt": {}, "networks": []}}:
             errors.append("Non-neutral defaults")
+        if m.get("ingress") is not True or m.get("ingress_port") != 0 or m.get("panel_admin") is not True or m.get("services") != ["mqtt:want"] or m.get("schema", {}).get("configuration_mode") != "list(legacy|guided)":
+            errors.append("Unexpected ingress settings")
         if m.get("apparmor") is not True or set(m.get("privileged", [])) != {"NET_ADMIN", "NET_RAW"} or m.get("hassio_api") is not True or m.get("hassio_role") != "manager" or any(m.get(k) for k in ("full_access", "host_pid", "docker_api", "map", "homeassistant_api")):
             errors.append("Unexpected permissions")
     except (OSError, ValueError, AttributeError, yaml.YAMLError):

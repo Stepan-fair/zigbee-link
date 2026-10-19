@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from urllib import request, error
 
 from .model import AppObservation
@@ -37,15 +38,17 @@ class HttpTransport:
         self.process_factory = process_factory
         self.lock = threading.RLock()
         self.processes = set()
+        self.scopes = {}
+        self.cancelled_scopes = set()
         self.closed = False
 
-    def request(self, method, path, body=None, timeout=5):
+    def request(self, method, path, body=None, timeout=5, *, scope=None):
         if method not in ("GET", "POST") or not path.startswith("/") or "//" in path or ".." in path:
             raise ValueError("Запрещённый запрос Supervisor")
         process = None
         try:
             with self.lock:
-                if self.closed:
+                if self.closed or scope in self.cancelled_scopes:
                     return HttpResult(503, b"")
                 # An owned child makes the total deadline cover DNS, slow headers
                 # and slow bodies, not just an individual socket read. No shell,
@@ -54,7 +57,13 @@ class HttpTransport:
                                                cwd=str(Path(__file__).resolve().parents[2]), stdin=subprocess.PIPE,
                                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 self.processes.add(process)
-            payload = json.dumps({"method": method, "path": path, "token": self._token}).encode()
+                self.scopes[process] = scope
+            if body is not None and (method != "POST" or path != "/addons/self/options" or not isinstance(body, dict)):
+                raise ValueError("Запрещённое тело запроса Supervisor")
+            payload = json.dumps({"method": method, "path": path, "token": self._token,
+                                  "body": body or {}}, allow_nan=False).encode()
+            if len(payload) > 1024 * 1024:
+                raise ValueError("Слишком большой запрос Supervisor")
             output, _ = process.communicate(payload, timeout=min(5, max(.05, timeout)))
             if process.returncode != 0 or len(output) > 1024 * 1024 + 16:
                 return HttpResult(503, b"")
@@ -69,6 +78,14 @@ class HttpTransport:
                 process.communicate(timeout=1)
                 with self.lock:
                     self.processes.discard(process)
+                    self.scopes.pop(process, None)
+
+    def cancel_scope(self, scope):
+        with self.lock:
+            self.cancelled_scopes.add(scope)
+            for process, owner in self.scopes.items():
+                if owner == scope and process.poll() is None:
+                    process.kill()
 
     def close(self):
         with self.lock:
@@ -84,11 +101,17 @@ ORIGIN = "http://supervisor"
 def _http_worker():
     """Private, bounded-output worker; its owner enforces the total deadline."""
     try:
-        raw = json.loads(sys.stdin.buffer.read(8192))
+        encoded = sys.stdin.buffer.read(1024 * 1024 + 1)
+        if len(encoded) > 1024 * 1024:
+            return 1
+        raw = json.loads(encoded)
         method, path = raw["method"], raw["path"]
         if method not in ("GET", "POST") or not path.startswith("/") or "//" in path or ".." in path:
             return 1
-        req = request.Request(ORIGIN + path, data=b"{}" if method == "POST" else None, method=method,
+        body = raw.get("body", {})
+        if not isinstance(body, dict) or body and (method != "POST" or path != "/addons/self/options"):
+            return 1
+        req = request.Request(ORIGIN + path, data=json.dumps(body, allow_nan=False).encode() if method == "POST" else None, method=method,
                               headers={"Authorization": "Bearer " + raw["token"], "Content-Type": "application/json"})
         opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
         with opener.open(req, timeout=5) as response:
@@ -103,12 +126,34 @@ def _http_worker():
 
 
 class SupervisorClient:
-    def __init__(self, token, transport=None, bindings=(), network_settings=None, clock=time.monotonic):
+    def __init__(self, token, transport=None, bindings=(), network_settings=None, clock=time.monotonic,
+                 controls_reader=None, command_guard=None):
         self.transport = transport if transport is not None else HttpTransport(token)
         self.bindings = tuple(bindings)
         self.network_settings = network_settings
         self.clock = clock
         self.watchdogs = {}
+        self.controls_reader, self.command_guard = controls_reader, command_guard
+        self.scopes = {b.key: b.key + "@" + uuid.uuid4().hex for b in bindings}
+        self.lock = threading.RLock()
+
+    def reconfigure(self, bindings):
+        with self.lock:
+            changed = {b.key for b in self.bindings if b not in bindings}
+            for key in changed:
+                cancel = getattr(self.transport, "cancel_scope", None)
+                if cancel:
+                    cancel(self.scopes[key])
+                self.scopes.pop(key, None)
+            for binding in bindings:
+                self.scopes.setdefault(binding.key, binding.key + "@" + uuid.uuid4().hex)
+            self.bindings = tuple(bindings)
+            self.watchdogs = {k: v for k, v in self.watchdogs.items() if k not in changed}
+
+    def _scope(self, binding):
+        with self.lock:
+            self._check(binding)
+            return self.scopes[binding.key]
 
     def close(self):
         close = getattr(self.transport, "close", None)
@@ -119,9 +164,10 @@ class SupervisorClient:
         if binding not in self.bindings:
             raise ValueError("Приложение отсутствует в разрешённой привязке")
 
-    def _data(self, method, path):
+    def _data(self, method, path, *, scope=None):
         try:
-            response = self.transport.request(method, path, timeout=5)
+            kwargs = {"scope": scope} if scope is not None and isinstance(self.transport, HttpTransport) else {}
+            response = self.transport.request(method, path, timeout=5, **kwargs)
             if response.status != 200 or len(response.body) > 1024 * 1024:
                 return None
             raw = json.loads(response.body)
@@ -132,6 +178,8 @@ class SupervisorClient:
             return None
 
     def self_controls(self):
+        if self.controls_reader is not None:
+            return self.controls_reader(self.bindings)
         data = self._data("GET", "/addons/self/info")
         if data is None or self.network_settings is None:
             return {}
@@ -198,8 +246,8 @@ class SupervisorClient:
             return True
 
     def observe(self, binding):
-        self._check(binding)
-        data = self._data("GET", f"/addons/{binding.addon_slug}/info")
+        scope = self._scope(binding)
+        data = self._data("GET", f"/addons/{binding.addon_slug}/info", scope=scope)
         if data is None:
             return AppObservation()
         valid = data.get("slug") == binding.addon_slug and isinstance(data.get("name"), str) and "zigbee2mqtt" in data["name"].lower().replace(" ", "")
@@ -213,12 +261,17 @@ class SupervisorClient:
         return AppObservation(True, state, run_id if isinstance(run_id, str) else None, busy, valid)
 
     def command(self, binding, kind):
-        self._check(binding)
+        scope = self._scope(binding)
         if kind not in ("start", "restart"):
             raise ValueError("Команда Supervisor запрещена")
-        data = self._data("POST", f"/addons/{binding.addon_slug}/{kind}")
+        data = self._data("POST", f"/addons/{binding.addon_slug}/{kind}", scope=scope)
         # HTTP acceptance is not proof that the app has started.
         return CommandOutcome(data is not None, "accepted" if data is not None else "outcome_unknown")
+
+    def command_with_revision(self, binding, kind, revision):
+        if self.command_guard:
+            return self.command_guard(binding, revision, lambda: self.command(binding, kind))
+        return self.command(binding, kind)
 
     def diagnose(self, binding, limit=200):
         self._check(binding)

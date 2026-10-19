@@ -1,0 +1,182 @@
+from dataclasses import replace
+import pytest
+from app.setup.model import Catalog, FieldValue
+from app.setup.store import SetupStoreError
+from app.manager import Status
+from test_setup_runtime import controller, accept_one, candidate
+
+
+def test_container_setup_fixture_imports_app_from_working_directory(tmp_path):
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "__init__.py").write_text("")
+    (app / "main.py").write_text("def main(): return 0\n")
+    (app / "network.py").write_text("class CommandRunner: pass\n")
+    fixture = Path(__file__).parent / "linux/setup_fixture.py"
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run([sys.executable, str(fixture.resolve()), "app"], cwd=tmp_path,
+                            env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
+def test_container_setup_fixture_waits_for_mqtt_connection(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+    directory = Path(__file__).parent / "linux"
+    monkeypatch.syspath_prepend(str(directory))
+    spec = importlib.util.spec_from_file_location("isolated_setup_fixture", directory / "setup_fixture.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fixture = module.SetupFixture.__new__(module.SetupFixture)
+    fixture.broker_host, fixture.broker_port = "broker", 1883
+    fixture.records = {"a": {"base_topic": "z2m/a", "coordinator_ieee": "0x0000000000000001", "ip": "172.31.254.2"}}
+    def premature_publish(*args, **kwargs):
+        raise AssertionError("Published before CONNACK")
+    fixture.client = SimpleNamespace(is_connected=lambda: False, publish=premature_publish)
+    assert fixture.publish_metadata() is False
+
+
+def guided_two(tmp_path):
+    ctl, fixture, clock = controller(tmp_path)
+    snapshot, first = accept_one(ctl)
+    snapshot, second = accept_one(ctl, candidate("172.31.254.3", "b_zigbee2mqtt", "0x0000000000000002", "floor/b"))
+    snapshot = ctl.edit_broker({"mode": "manual", "server": "mqtt://broker.invalid"}, expected_revision=snapshot.revision)
+    transition = ctl.prepare_transition("guided", expected_revision=snapshot.revision)
+    assert ctl.commit_transition(transition.receipt)
+    for record in (first, second):
+        snapshot = ctl.control(record.network_id, managed=True, enabled=True, expected_revision=ctl.store.snapshot().revision)
+    return ctl, fixture, clock, first, second
+
+
+def test_two_guided_networks_a_returns_without_restarting_healthy_b(tmp_path):
+    from app.recovery.service import RecoveryService
+    from test_recovery_service import Supervisor, Mqtt, Probe, pump
+    ctl, fixture, clock, a, b = guided_two(tmp_path)
+    config = ctl.configuration()
+    supervisor = Supervisor(config, clock)
+    supervisor.self_controls = lambda: ctl.controls_for(config.bindings)
+    supervisor.command_with_revision = lambda binding, kind, revision: ctl.guard_command(binding, revision, lambda: supervisor.command(binding, kind))
+    mqtt = Mqtt(supervisor, clock)
+    probe = Probe()
+    probe.present = {"172.31.254.3"}
+    service = RecoveryService(config, ctl.recovery_store, supervisor, mqtt, probe, ctl.journal, clock)
+    ctl.service = service
+    pump(service, clock, 240)
+    assert supervisor.commands == [(b.state_key, "start")]
+    probe.present.add("172.31.254.2")
+    pump(service, clock, 240)
+    assert supervisor.commands == [(b.state_key, "start"), (a.state_key, "start")]
+    ctl.control(a.network_id, paused=True, expected_revision=ctl.store.snapshot().revision)
+    supervisor.states[a.state_key] = "stopped"
+    pump(service, clock, 300)
+    assert len(supervisor.commands) == 2
+    assert ctl.recovery_store.load(a.state_key).phase == "paused"
+    ctl.close()
+
+
+def test_month_of_retained_metadata_is_not_live_radio_evidence(tmp_path):
+    ctl, _, clock, a, b = guided_two(tmp_path)
+    clock.advance(31 * 86400)
+    view = ctl.view()
+    assert all(record["radio"] != "confirmed" for record in view.networks)
+    assert all(ctl.recovery_store.command_count(record.state_key, 0) == 0 for record in (a, b))
+    ctl.close()
+
+
+def test_manual_override_and_pause_survive_rescan_and_restart(tmp_path):
+    from test_setup_runtime import controller as reopen
+    ctl, fixture, _, a, b = guided_two(tmp_path)
+    snapshot = ctl.edit(a.network_id, {"name": {"mode": "manual", "value": "My network"}}, expected_revision=ctl.store.snapshot().revision)
+    snapshot = ctl.control(a.network_id, paused=True, expected_revision=snapshot.revision)
+    catalog = ctl.store.catalog()
+    proposal = candidate("172.31.254.8")
+    ctl.store.save_catalog(replace(catalog, candidates=(proposal,)), expected_revision=catalog.revision)
+    ctl._adopt_discovery()
+    options = fixture.options
+    ctl.close()
+    ctl, _, _ = reopen(tmp_path, options=options)
+    record = next(r for r in ctl.store.snapshot().networks if r.network_id == a.network_id)
+    assert record.fields["name"].value == "My network" and record.paused
+    assert record.fields["ip"].value == "172.31.254.2" and record.fields["ip"].proposal == "172.31.254.8"
+    ctl.close()
+
+
+def test_corrupt_row_isolated_from_second_network_and_never_replaced(tmp_path):
+    ctl, _, _, a, b = guided_two(tmp_path)
+    ctl.store.db.execute("UPDATE networks SET payload=? WHERE network_id=?", ('{"bad":', a.network_id))
+    ctl.store.db.commit()
+    config = ctl.configuration()
+    assert [binding.key for binding in config.bindings] == [b.state_key]
+    assert list(ctl.controls_for(config.bindings)) == [b.state_key]
+    snapshot = ctl.control(b.network_id, paused=True, expected_revision=ctl.store.snapshot().revision)
+    assert ctl.store.db.execute("SELECT payload FROM networks WHERE network_id=?", (a.network_id,)).fetchone()[0] == '{"bad":'
+    ctl.close()
+
+
+def test_full_setup_database_keeps_pause_and_recovery_budget(tmp_path):
+    from app.recovery.model import Action
+    ctl, _, _, a, b = guided_two(tmp_path)
+    snapshot = ctl.control(a.network_id, paused=True, expected_revision=ctl.store.snapshot().revision)
+    ctl.recovery_store.reserve(Action("start", a.state_key, "g"), 1000, "r")
+    pages = ctl.store.db.execute("PRAGMA page_count").fetchone()[0]
+    ctl.store.db.execute(f"PRAGMA max_page_count={pages}")
+    rows = tuple(replace(candidate(slug=f"n{i}_zigbee2mqtt"), fields={"name": FieldValue("auto", "x" * 1000, "mqtt", 0, "found")}) for i in range(253))
+    with pytest.raises(SetupStoreError):
+        ctl.store.save_catalog(Catalog(candidates=rows), expected_revision=ctl.store.catalog().revision)
+    assert ctl.store.snapshot() == snapshot
+    assert ctl.recovery_store.command_count(a.state_key, 0) == 1
+    ctl.close()
+
+
+def test_incomplete_network_cannot_enable_management(tmp_path):
+    ctl, _, _ = controller(tmp_path)
+    snapshot, record = accept_one(ctl, replace(candidate(ieee=""), match_kind="proposed"))
+    with pytest.raises(ValueError):
+        ctl.control(record.network_id, managed=True, expected_revision=snapshot.revision)
+    ctl.close()
+
+
+def test_guided_observation_preserves_manual_diagnostic_addresses(tmp_path):
+    options = {"address": "172.31.254.1/24", "coordinators": [{"name": "Manual diagnostic", "ip": "172.31.254.4"}]}
+    ctl, _, _ = controller(tmp_path, options=options)
+    snapshot, record = accept_one(ctl)
+    transition = ctl.prepare_transition("guided", expected_revision=snapshot.revision)
+    assert ctl.commit_transition(transition.receipt)
+    assert {str(c.address) for c in ctl.effective_settings().coordinators} == {"172.31.254.2", "172.31.254.4"}
+    assert ctl.view().network["manual_unbound_ips"] == ["172.31.254.4"]
+    ctl.close()
+
+
+def test_view_does_not_reuse_confirmed_phase_after_mqtt_disconnect(tmp_path):
+    from types import SimpleNamespace
+    from app.recovery.model import RecoveryState, Binding
+    from app.recovery.mqtt import MqttObservation
+    ctl, _, _ = controller(tmp_path)
+    snapshot, record = accept_one(ctl)
+    binding = Binding(record.state_key, "172.31.254.2", "a_zigbee2mqtt", "floor/a", "0x0000000000000001")
+    ctl.recovery_store.save(record.state_key, RecoveryState(phase="confirmed", generation="g"))
+    ctl.service = SimpleNamespace(runtimes={record.state_key: SimpleNamespace(binding=binding)},
+                                 mqtt=SimpleNamespace(snapshot=lambda key, now: MqttObservation(False, "g", True, 1, True, ())))
+    try:
+        assert ctl.view().networks[0]["radio"] != "confirmed"
+    finally:
+        ctl.service = None
+        ctl.close()
+
+
+def test_matcher_output_is_accepted_for_observation_without_manual_confirmation(tmp_path):
+    from app.setup.matching import match_networks
+    from test_setup_matching import A, BA, BROKER
+    ctl, _, _ = controller(tmp_path)
+    candidates = match_networks((A,), (BA,), broker=BROKER, subnet=ctl.settings.address.network)
+    assert len(candidates) == 1
+    catalog = ctl.store.save_catalog(Catalog(candidates=tuple(candidates)), expected_revision=0)
+    snapshot = ctl.accept(candidates[0].candidate_id, catalog_revision=catalog.revision, expected_revision=0)
+    assert snapshot.networks[0].accepted and not snapshot.networks[0].managed
+    ctl.close()

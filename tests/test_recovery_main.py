@@ -11,6 +11,15 @@ def test_legacy_options_do_not_construct_recovery(tmp_path):
     assert main.make_recovery({},parse_settings({}),None,None,tmp_path,None) is None
 
 
+def test_setup_starts_without_recovery_configuration(tmp_path, monkeypatch):
+    import app.setup.runtime as runtime
+    made = []
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "test-token")
+    monkeypatch.setattr(runtime, "SetupController", lambda *args: made.append(args) or "controller")
+    assert main.make_setup({}, parse_settings({}), None, None, tmp_path, None) == "controller"
+    assert len(made) == 1
+
+
 def test_recovery_tick_and_shutdown_precede_interface_cleanup(tmp_path,monkeypatch):
     events=[]
     class Event:

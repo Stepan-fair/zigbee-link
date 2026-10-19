@@ -21,6 +21,7 @@ class SafeEvent:
 
 
 FACTS = {"misses", "successes", "hour_count", "day_count", "seconds", "health_failures", "next_seconds", "present", "conflict"}
+FACTS.update({"revision", "candidate_count", "network_count"})
 WAITING = {"coordinator_absent", "network_unavailable", "mqtt_unavailable", "supervisor_unavailable", "permission_unknown", "action_budget", "action_backoff", "measurement_unknown", "radio_not_confirmed"}
 WAITING.update({"radio_confirmed", "scheduler_busy", "disabled", "maintenance", "configuration_error", "address_conflict",
                 "identity_mismatch", "binding_invalid", "command_pending", "app_busy", "return_grace",
