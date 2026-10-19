@@ -64,6 +64,26 @@ class MqttMonitor:
         self.client.disconnect()
         self.client.loop_stop()
 
+    def reconfigure(self, bindings):
+        with self.lock:
+            old_topics = set(self.topics)
+            changed = {key for key, binding in self.bindings.items() if binding not in bindings}
+            for key in changed:
+                self.invalidate(key)
+            self.bindings = {b.key: b for b in bindings}
+            self.pending = {tx: p for tx, p in self.pending.items() if p["key"] in self.bindings and p["key"] not in changed}
+            self.epochs = {b.key: self.epochs.get(b.key, uuid.uuid4().hex) for b in bindings}
+            self.evidence = {b.key: self.evidence.get(b.key, {"health": None, "health_at": -1, "sequence": 0,
+                "identity": None, "identity_at": -1, "radio": deque(maxlen=2)}) for b in bindings}
+            self.topics = {b.base_topic + "/bridge/" + suffix: (b.key, suffix) for b in bindings for suffix in (
+                "info", "state", "response/health_check", "response/device/reporting/read")}
+            if self.connected:
+                removed, added = old_topics - self.topics.keys(), self.topics.keys() - old_topics
+                if removed:
+                    self.client.unsubscribe(list(removed))
+                if added:
+                    self.client.subscribe([(topic, 1) for topic in added])
+
     def _on_connect(self, client, userdata, flags, reason, properties):
         if reason == 0:
             self.on_connected()

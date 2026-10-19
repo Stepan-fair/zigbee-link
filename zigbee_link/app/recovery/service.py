@@ -46,6 +46,7 @@ class RecoveryService:
         self.clock, self.cancelled = clock or SystemClock(), cancelled
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="zigbee-recovery")
         self.futures = {}
+        self.retired_futures = []
         self.runtimes = {b.key: Runtime(b, reference_times={}) for b in config.bindings}
         self.closed = False
         self.store_available = True
@@ -75,7 +76,7 @@ class RecoveryService:
                 self._quarantine(key)
 
     def _quarantine(self, key):
-        if key not in self.blocked_keys:
+        if key not in self.blocked_keys and key in self.runtimes:
             self.blocked_keys.add(key)
             self._emit(key, RecoveryState(phase="blocked"), "state_corrupt")
 
@@ -131,7 +132,8 @@ class RecoveryService:
                 self.store.resolve(receipt, "cancelled", app.run_id)
                 return receipt, "cancelled"
             self.mqtt.invalidate(binding.key)
-            result = self.supervisor.command(binding, action.kind)
+            guarded = getattr(self.supervisor, "command_with_revision", None)
+            result = guarded(binding, action.kind, revision) if guarded else self.supervisor.command(binding, action.kind)
             # Old process replies during the HTTP request cannot resolve its outcome.
             self.mqtt.invalidate_health(binding.key)
             return receipt, result.reason
@@ -141,8 +143,9 @@ class RecoveryService:
         except StoreError:
             self.store_available = False
             return receipt, "storage_unavailable"
-        except (OSError, ValueError, RuntimeError):
-            self.mqtt.invalidate(binding.key)
+        except (OSError, ValueError, RuntimeError, KeyError):
+            if binding in self.config.bindings:
+                self.mqtt.invalidate(binding.key)
             return receipt, "outcome_unknown"
 
     def _authorized(self, controls, revision, app):
@@ -153,10 +156,13 @@ class RecoveryService:
                     and app.binding_valid and not app.busy and app.state in ("started", "stopped", "error"))
 
     def _collect(self, now):
+        self.retired_futures = [f for f in self.retired_futures if not f.done()]
         for key, (future, kind) in list(self.futures.items()):
             if not future.done():
                 continue
             del self.futures[key]
+            if kind != "arp" and getattr(future, "_zigbee_runtime", self.runtimes.get(key)) is not self.runtimes.get(key):
+                continue
             try:
                 value = future.result()
                 if kind == "arp":
@@ -185,6 +191,19 @@ class RecoveryService:
                     self.runtimes[key].controls = None
                     self.runtimes[key].app = AppObservation()
                     self.runtimes[key].next_observe = now + 15
+
+    def _poll_authorized(self, runtime, now):
+        if self.closed or runtime.binding not in self.config.bindings:
+            return
+        controls = self.supervisor.self_controls().get(runtime.binding.key)
+        if not controls or not controls.managed or controls.paused:
+            return
+        runtime.controls = controls
+        guard = getattr(self.supervisor, "command_guard", None)
+        if guard:
+            guard(runtime.binding, controls.revision, lambda: self._mqtt_poll(runtime, now))
+        else:
+            self._mqtt_poll(runtime, now)
 
     def _mqtt_poll(self, runtime, now):
         controls = runtime.controls
@@ -219,7 +238,14 @@ class RecoveryService:
         mqtt = self.mqtt.snapshot(key, now)
         if state.generation != mqtt.generation:
             runtime.next_radio = now
-        self._mqtt_poll(runtime, now)
+        if getattr(self.supervisor, "controls_reader", None) is not None:
+            # Fresh HTTP permissions run in the same bounded worker pool as observations.
+            if key not in self.futures and len(self.futures) + len(self.retired_futures) < 4 and now < runtime.next_observe and (now >= runtime.next_health or runtime.binding.references and now >= runtime.next_radio):
+                future = self.pool.submit(self._poll_authorized, runtime, now)
+                future._zigbee_runtime = runtime
+                self.futures[key] = (future, "poll")
+        else:
+            self._mqtt_poll(runtime, now)
         mqtt = self.mqtt.snapshot(key, now)
         radio = None
         for reply in mqtt.radio_replies:
@@ -252,7 +278,7 @@ class RecoveryService:
             runtime.next_radio = now
             decision = replace(decision, state=replace(decision.state, generation=self.mqtt.snapshot(key, now).generation,
                                                        health_misses=0, last_health_sequence=-1))
-        if decision.action and (key in self.futures or len(self.futures) >= 4):
+        if decision.action and (key in self.futures or len(self.futures) + len(self.retired_futures) >= 4):
             decision = replace(decision, action=None, reason="scheduler_busy",
                                state=replace(decision.state, phase="waiting", next_attempt=state.next_attempt,
                                              attempt_stage=state.attempt_stage))
@@ -264,9 +290,10 @@ class RecoveryService:
                    "successes": next_state.successes, "hour_count": budget.hour_count, "day_count": budget.day_count})
         if next_state.incident_id and next_state.stable_since is not None and now - next_state.stable_since >= 300 and next_state.phase in ("confirmed", "unconfirmed", "degraded"):
             self.store.finish_incident(key, "radio_confirmed" if next_state.phase == "confirmed" else "application_only")
-        if decision.action and key not in self.futures and len(self.futures) < 4:
+        if decision.action and key not in self.futures and len(self.futures) + len(self.retired_futures) < 4:
             self.futures[key] = (self.pool.submit(self._dispatch, runtime.binding, decision.action,
                                                 runtime.controls.revision), "command")
+            self.futures[key][0]._zigbee_runtime = runtime
 
     def tick(self, network_status):
         if self.closed or self.cancelled():
@@ -286,7 +313,7 @@ class RecoveryService:
         self.network_ready = network_ready
         if not network_ready:
             self.arp = {}
-        if network_ready and now >= self.next_arp and "__arp__" not in self.futures and len(self.futures) < 4:
+        if network_ready and now >= self.next_arp and "__arp__" not in self.futures and len(self.futures) + len(self.retired_futures) < 4:
             targets = tuple(IPv4Address(b.ip) for b in self.config.bindings)
             self.futures["__arp__"] = (self.pool.submit(self.probe, targets), "arp")
             self.next_arp = now + 30
@@ -305,17 +332,37 @@ class RecoveryService:
         # network from occupying every slot or starving later bindings.
         for runtime in sorted(self.runtimes.values(), key=lambda r: r.next_observe):
             key = runtime.binding.key
-            if len(self.futures) >= 4:
+            if len(self.futures) + len(self.retired_futures) >= 4:
                 break
             if now >= runtime.next_observe and key not in self.futures:
                 self.futures[key] = (self.pool.submit(self._observe, runtime.binding), "observe")
+                self.futures[key][0]._zigbee_runtime = runtime
         if int(now) % 3600 == 0 and self.store_available:
             try:
                 self.store.prune(self.logical_utc)
             except StoreError:
                 self.store_available = False
 
-    def close(self):
+    def reconfigure(self, config):
+        if self.closed:
+            return
+        changed = {key for key, runtime in self.runtimes.items() if runtime.binding not in config.bindings}
+        for key in changed:
+            old = self.futures.pop(key, None)
+            if old:
+                old[0].cancel()
+                self.retired_futures.append(old[0])
+            self.arp.pop(key, None)
+        update = getattr(self.supervisor, "reconfigure", None)
+        if update:
+            update(config.bindings)
+        self.mqtt.reconfigure(config.bindings)
+        self.runtimes = {b.key: self.runtimes[b.key] if b.key in self.runtimes and b.key not in changed
+                         else Runtime(b, reference_times={}) for b in config.bindings}
+        self.config = config
+        self.next_arp = 0
+
+    def close(self, *, close_store=True):
         if self.closed:
             return
         self.closed = True
@@ -326,4 +373,5 @@ class RecoveryService:
             future.cancel()
         self.pool.shutdown(wait=True, cancel_futures=True)
         self.mqtt.stop()
-        self.store.close()
+        if close_store:
+            self.store.close()

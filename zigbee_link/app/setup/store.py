@@ -87,7 +87,7 @@ class SetupStore:
         self.close()
 
     @contextmanager
-    def transaction(self):
+    def transaction(self, *, preserve_validation=False):
         with self.lock:
             outer = not self.db.in_transaction
             try:
@@ -99,7 +99,7 @@ class SetupStore:
             except Exception as exc:
                 if outer:
                     self.db.rollback()
-                if isinstance(exc, (sqlite3.Error, OSError, ValueError, TypeError, KeyError)):
+                if isinstance(exc, (sqlite3.Error, OSError)) or not preserve_validation and isinstance(exc, (ValueError, TypeError, KeyError)):
                     raise SetupStoreError("setup_store_unavailable") from None
                 raise
 
