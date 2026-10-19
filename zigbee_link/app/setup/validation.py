@@ -112,7 +112,7 @@ def validate_network(record, subnet):
         issues.append("invalid_references")
     else:
         for ref in refs:
-            if not isinstance(ref, dict) or not isinstance(ref.get("ieee"), str) or not IEEE.fullmatch(ref["ieee"]) or type(ref.get("endpoint")) is not int or not 1 <= ref["endpoint"] <= 240 or any(not isinstance(ref.get(k), str) or not IDENTIFIER.fullmatch(ref[k]) for k in ("cluster", "attribute")):
+            if not isinstance(ref, dict) or set(ref) != {"ieee", "endpoint", "cluster", "attribute"} or not isinstance(ref.get("ieee"), str) or not IEEE.fullmatch(ref["ieee"]) or type(ref.get("endpoint")) is not int or not 1 <= ref["endpoint"] <= 240 or any(not isinstance(ref.get(k), str) or not IDENTIFIER.fullmatch(ref[k]) for k in ("cluster", "attribute")):
                 issues.append("invalid_references")
     name = values.get("name", "")
     if not isinstance(name, str) or len(name) > 100 or any(ord(c) < 32 for c in name):

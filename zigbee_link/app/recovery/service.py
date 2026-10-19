@@ -5,6 +5,7 @@ from ipaddress import IPv4Address
 import logging
 import math
 import time
+import threading
 import uuid
 
 from .journal import SafeEvent
@@ -49,6 +50,8 @@ class RecoveryService:
         self.retired_futures = []
         self.runtimes = {b.key: Runtime(b, reference_times={}) for b in config.bindings}
         self.closed = False
+        self.shutdown_complete = False
+        self.close_lock = threading.Lock()
         self.store_available = True
         self.blocked_keys = set()
         self.verifier = RadioVerifier()
@@ -201,9 +204,9 @@ class RecoveryService:
         runtime.controls = controls
         guard = getattr(self.supervisor, "command_guard", None)
         if guard:
-            guard(runtime.binding, controls.revision, lambda: self._mqtt_poll(runtime, now))
+            guard(runtime.binding, controls.revision, lambda: self._mqtt_poll(runtime, self.clock.monotonic()))
         else:
-            self._mqtt_poll(runtime, now)
+            self._mqtt_poll(runtime, self.clock.monotonic())
 
     def _mqtt_poll(self, runtime, now):
         controls = runtime.controls
@@ -362,7 +365,7 @@ class RecoveryService:
         self.config = config
         self.next_arp = 0
 
-    def close(self, *, close_store=True):
+    def begin_close(self):
         if self.closed:
             return
         self.closed = True
@@ -371,7 +374,14 @@ class RecoveryService:
             cancel_io()
         for future, kind in self.futures.values():
             future.cancel()
-        self.pool.shutdown(wait=True, cancel_futures=True)
         self.mqtt.stop()
-        if close_store:
-            self.store.close()
+
+    def close(self, *, close_store=True):
+        with self.close_lock:
+            if self.shutdown_complete:
+                return
+            self.begin_close()
+            self.pool.shutdown(wait=True, cancel_futures=True)
+            if close_store:
+                self.store.close()
+            self.shutdown_complete = True

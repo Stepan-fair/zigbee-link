@@ -40,6 +40,10 @@ class MqttMonitor:
         self.bindings = {b.key: b for b in bindings}
         self.lock = threading.RLock()
         self.connected = False
+        self.stopped = False
+        self.cleanup_done = threading.Event()
+        self.cleanup_ok = False
+        self.cleanup_thread = None
         self.pending = {}
         self.epochs = {b.key: uuid.uuid4().hex for b in bindings}
         self.evidence = {b.key: {"health": None, "health_at": -1, "sequence": 0, "identity": None, "identity_at": -1, "radio": deque(maxlen=2)} for b in bindings}
@@ -61,8 +65,23 @@ class MqttMonitor:
         self.client.loop_start()
 
     def stop(self):
-        self.client.disconnect()
-        self.client.loop_stop()
+        with self.lock:
+            if self.cleanup_thread is None:
+                self.stopped, self.connected = True, False
+                for key in self.bindings:
+                    self.invalidate(key)
+                def cleanup():
+                    try:
+                        self.client.disconnect()
+                        self.client.loop_stop()
+                        self.cleanup_ok = True
+                    except Exception:
+                        pass
+                    finally:
+                        self.cleanup_done.set()
+                self.cleanup_thread = threading.Thread(target=cleanup, name="zigbee-mqtt-cleanup", daemon=True)
+                self.cleanup_thread.start()
+        self.cleanup_done.wait(.25)
 
     def reconfigure(self, bindings):
         with self.lock:
@@ -92,6 +111,9 @@ class MqttMonitor:
 
     def on_connected(self):
         with self.lock:
+            if self.stopped:
+                self.client.disconnect()
+                return
             self.connected = True
             for key in self.bindings:
                 self.invalidate(key)
@@ -131,7 +153,7 @@ class MqttMonitor:
 
     def _request(self, key, kind, now, reference=None):
         with self.lock:
-            if key not in self.bindings or not self.connected:
+            if self.stopped or key not in self.bindings or not self.connected:
                 return ""
             self._expire(now)
             for tx, p in self.pending.items():
@@ -173,7 +195,7 @@ class MqttMonitor:
         except (ValueError, UnicodeError, RecursionError):
             return
         with self.lock:
-            if not self.connected:
+            if self.stopped or not self.connected or topic not in self.topics:
                 return
             self._expire(now)
             key, suffix = self.topics[topic]

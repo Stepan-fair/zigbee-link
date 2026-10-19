@@ -13,7 +13,7 @@ from ..config import Coordinator
 from ..recovery.journal import EventJournal, SafeEvent
 from ..recovery.model import Binding, Controls, Reference
 from ..recovery.service import SystemClock
-from ..recovery.settings import RecoveryConfiguration, MqttSettings, parse_recovery, _mqtt, fingerprint
+from ..recovery.settings import RecoveryConfiguration, MqttSettings, parse_recovery, _mqtt, fingerprint, IEEE, SLUG
 from ..recovery.store import RecoveryStore
 from ..recovery.supervisor import HttpTransport, CommandOutcome
 from .model import (BrokerConnection, BrokerRecord, FieldValue, NetworkRecord,
@@ -23,7 +23,7 @@ from .secrets import SecretStore
 from .service import DiscoveryService
 from .store import SetupStore, SetupStoreError, RevisionConflict
 from .supervisor import SupervisorCatalogReader, DiscoverySourceError, options_digest
-from .validation import FIELDS, PINNED, validate_network, select_configuration_mode, configuration_readiness
+from .validation import FIELDS, PINNED, validate_network, valid_topic, select_configuration_mode, configuration_readiness
 
 LOG = logging.getLogger("zigbee-link")
 NONBLOCKING = {"radio_reference_unavailable"}
@@ -47,6 +47,7 @@ class SetupController:
         self.mode = select_configuration_mode(options)
         self.capabilities = SupervisorCapabilities()
         self.service = None
+        self.retiring = None
         self.web = None
         self.next_web = 0
         self.closed = False
@@ -57,6 +58,19 @@ class SetupController:
         self.applied_config = None
         self._recover_transition()
         self.secrets.collect({s.broker.secret_ref for s in (self.store.snapshot(),) if s.broker and s.broker.secret_ref})
+        self._restore_discovery_connection()
+
+    def _restore_discovery_connection(self):
+        snapshot = self.store.snapshot()
+        if snapshot.broker and snapshot.broker.mode == "manual":
+            try:
+                connection = self._connection(snapshot)
+            except (OSError, ValueError):
+                connection = None
+            # A missing manual secret is a dependency failure, never a service fallback.
+            self.discovery.set_connection(connection, pinned=True)
+        else:
+            self.discovery.set_connection(None)
 
     def _event(self, code, *, source="auto", outcome=None):
         snapshot = self.store.snapshot()
@@ -219,7 +233,7 @@ class SetupController:
     def _import_legacy(self, snapshot):
         config = parse_recovery(self.options.get("recovery", {}), self.settings)
         broker = snapshot.broker
-        if config.mqtt and not broker:
+        if config.mqtt:
             secret = self.secrets.write(config.mqtt.username, config.mqtt.password)
             broker = BrokerRecord("manual:" + sha256(config.mqtt.server.encode()).hexdigest(), "manual", config.mqtt.server, secret_ref=secret)
         records = list(snapshot.networks)
@@ -232,6 +246,30 @@ class SetupController:
                           coordinator_ieee=binding.coordinator_ieee, references=[asdict(r) for r in binding.references])
             record = NetworkRecord(network_id, state_key, {k: FieldValue("manual", v, "legacy", self.clock.time(), "accepted") for k, v in values.items()},
                                    control.managed, control.paused, True)
+            records = [r for r in records if r.network_id != network_id] + [record]
+        raw_recovery = self.options.get("recovery", {})
+        raw_records = raw_recovery.get("networks", []) if isinstance(raw_recovery, dict) else []
+        raw_records = raw_records[:253] if isinstance(raw_records, list) else []
+        valid_signatures = {(b.ip, b.addon_slug, b.base_topic, b.coordinator_ieee) for b in config.bindings}
+        for index, raw in enumerate(raw_records):
+            raw = raw if isinstance(raw, dict) else {}
+            try:
+                ip = str(IPv4Address(raw.get("ip")))
+            except (ValueError, TypeError):
+                ip = ""
+            slug = raw.get("addon_slug")
+            slug = slug if isinstance(slug, str) and SLUG.fullmatch(slug) and "zigbee2mqtt" in slug else ""
+            ieee = raw.get("coordinator_ieee")
+            ieee = ieee.lower() if isinstance(ieee, str) and IEEE.fullmatch(ieee) else ""
+            topic = raw.get("base_topic") if valid_topic(raw.get("base_topic")) else ""
+            if (ip, slug, topic, ieee) in valid_signatures:
+                continue
+            network_id, state_key = self.store.state_key(((broker.identity if broker else "unconfigured"), ieee or f"legacy-record:{index}"),
+                                                        legacy_key=ip or None, addon_slug=slug or None)
+            values = dict(name=next((c.name for c in self.settings.coordinators if str(c.address) == ip), f"Прежняя сеть {index + 1}"),
+                          ip=ip, serial_port=6638, addon_slug=slug, base_topic=topic, coordinator_ieee=ieee, references=[])
+            record = NetworkRecord(network_id, state_key, {k: FieldValue("manual", v, "legacy", self.clock.time(), "incomplete") for k, v in values.items()},
+                                   False, True, False, issues=("legacy_record_invalid",))
             records = [r for r in records if r.network_id != network_id] + [record]
         return self.store.save(replace(snapshot, enabled=config.enabled, broker=broker, networks=tuple(records)), expected_revision=snapshot.revision)
 
@@ -276,6 +314,7 @@ class SetupController:
                 return False
             self.options, self.mode = actual, transition.target_mode
             self.store.save_transition(replace(transition, phase="verified"))
+            self._restore_discovery_connection()
             self._event("setup_migration", outcome="verified")
             return True
 
@@ -339,7 +378,11 @@ class SetupController:
                     groups.setdefault(getattr(binding, name), []).append(binding.key)
                 duplicate_keys.update(k for group in groups.values() if len(group) > 1 for k in group)
             bindings = tuple(b for b in bindings if b.key not in duplicate_keys)
-            connection = self._connection(snapshot)
+            try:
+                connection = self._connection(snapshot)
+            except (OSError, ValueError):
+                connection = None
+                errors["mqtt"] = "mqtt_credentials_unavailable"
             return RecoveryConfiguration(snapshot.enabled, bindings, {b.key: controls[b.key] for b in bindings}, connection.settings if connection else None, errors)
 
     def controls_for(self, bindings):
@@ -408,15 +451,32 @@ class SetupController:
 
     def _apply(self):
         config = self.configuration()
-        if self.applied_config == config:
+        if self.applied_config == config and self.retiring is None:
             return
         from ..recovery.mqtt import MqttMonitor
         from ..recovery.supervisor import SupervisorClient
         from ..recovery.service import RecoveryService
         broker_changed = self.applied_config is not None and self.applied_config.mqtt != config.mqtt
         if self.service and (broker_changed or not config.bindings or not config.mqtt):
-            self.service.close(close_store=False)
+            old = self.service
+            old.begin_close()
+            done = threading.Event()
+            def retire():
+                try:
+                    old.close(close_store=False)
+                finally:
+                    done.set()
+            worker = threading.Thread(target=retire, name="zigbee-recovery-retire", daemon=True)
+            self.retiring = (old, done, worker)
             self.service = None
+            worker.start()
+        if self.retiring is not None:
+            old, done, worker = self.retiring
+            cleanup_done = getattr(old.mqtt, "cleanup_done", None)
+            if not done.is_set() or cleanup_done is not None and (not cleanup_done.is_set() or not old.mqtt.cleanup_ok):
+                self.last_error = "mqtt_cleanup_pending"
+                return
+            self.retiring = None
         if self.service:
             self.service.reconfigure(config)
         elif config.bindings and config.mqtt and self.probe is not None and self.identity is not None:
@@ -516,8 +576,10 @@ class SetupController:
         if web_server:
             web_server.close()
         self.discovery.close()
+        self.reader.close()
         if service:
             service.close(close_store=False)
-        self.reader.close()
+        if self.retiring:
+            self.retiring[1].wait(5)
         self.recovery_store.close()
         self.store.close()

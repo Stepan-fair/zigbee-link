@@ -16,6 +16,7 @@ class DiscoveryService:
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="zigbee-discovery")
         self.future = self.collector = self.retired = None
         self.connection = self.connection_override = None
+        self.connection_selected = False
         self.apps_metadata = ()
         self.deadline = self.next_scan = 0
         self.last_scan = float("-inf")
@@ -23,11 +24,12 @@ class DiscoveryService:
         self.closed = False
         self.issues = ()
 
-    def set_connection(self, connection):
+    def set_connection(self, connection, *, pinned=None):
         self.connection_override = connection
+        self.connection_selected = connection is not None if pinned is None else pinned
 
     def _read_sources(self):
-        connection = self.connection_override or self.reader.mqtt_service(scan=True)
+        connection = self.connection_override if self.connection_selected else self.reader.mqtt_service(scan=True)
         apps = self.reader.apps()
         return connection, apps, self.reader.issues
 
