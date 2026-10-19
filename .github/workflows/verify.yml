@@ -15,7 +15,7 @@ jobs:
           python-version: '3.12'
       - name: Install test dependencies
         run: |
-          python -m pip install pytest PyYAML scapy paho-mqtt==2.1.0
+          python -m pip install pytest PyYAML scapy paho-mqtt==2.1.0 aiohttp==3.14.5
           sudo apt-get update -qq
           sudo apt-get install -y iproute2 iputils-ping iptables apparmor-utils mosquitto mosquitto-clients openssl
       - name: Test real Linux networking
@@ -27,7 +27,7 @@ jobs:
       - name: Validate AppArmor syntax
         run: sudo apparmor_parser -Q zigbee_link/apparmor.txt
       - name: Build amd64 image
-        run: docker build --build-arg BUILD_VERSION=1.2.0 --build-arg BUILD_ARCH=amd64 -t zigbee-link:ci zigbee_link
+        run: docker build --build-arg BUILD_VERSION="$(sed -n 's/^version: //p' zigbee_link/config.yaml)" --build-arg BUILD_ARCH=amd64 -t zigbee-link:ci zigbee_link
       - name: Verify enforced AppArmor, ARP and clean exit
         run: |
           profile="zigbee_ci_${GITHUB_RUN_ID}"
@@ -108,19 +108,59 @@ jobs:
           docker rm -f recovery-radio recovery-fixture recovery-broker
           docker network rm zigbee-recovery-ci
           sudo apparmor_parser -R "$RUNNER_TEMP/recovery-apparmor"
+      - name: Verify automatic setup through real ingress peer under AppArmor
+        timeout-minutes: 5
+        run: |
+          profile="zigbee_setup_${GITHUB_RUN_ID}"
+          sed "s/profile zigbee_link /profile $profile /" zigbee_link/apparmor.txt > "$RUNNER_TEMP/setup-apparmor"
+          sudo apparmor_parser -r "$RUNNER_TEMP/setup-apparmor"
+          printf '%s\n' 'listener 1883' 'allow_anonymous true' 'persistence false' > "$RUNNER_TEMP/setup-mosquitto.conf"
+          docker network create --internal --subnet 172.30.32.0/24 zigbee-setup-ci
+          docker run -d --name setup-broker --network zigbee-setup-ci --network-alias broker --ip 172.30.32.4 -v "$RUNNER_TEMP/setup-mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" eclipse-mosquitto:2
+          docker run -d --name setup-fixture --network zigbee-setup-ci --network-alias supervisor --ip 172.30.32.3 --cap-drop ALL --cap-add NET_BIND_SERVICE -v "$PWD/tests/linux:/fixtures:ro" --entrypoint python3 zigbee-link:ci -u /fixtures/setup_fixture.py
+          mkdir "$RUNNER_TEMP/setup-data"
+          PYTHONPATH=tests/linux python -c 'from setup_fixture import initial_options; import json,os; from pathlib import Path; Path(os.environ["RUNNER_TEMP"],"setup-data","options.json").write_text(json.dumps(initial_options()))'
+          sudo chown root:root "$RUNNER_TEMP/setup-data"
+          docker run -d --name setup-radio --network zigbee-setup-ci --ip 172.30.32.22 --cap-drop ALL --cap-add NET_ADMIN -v "$PWD/tests/linux:/fixtures:ro" --entrypoint python3 zigbee-link:ci /fixtures/setup_fixture.py serial-watch
+          docker exec setup-radio ip addr add 172.31.254.2/24 dev eth0
+          docker exec setup-radio ip addr add 172.31.254.3/24 dev eth0
+          docker run -d --name zigbee-setup-check --network zigbee-setup-ci --ip 172.30.32.5 --security-opt "apparmor=$profile" --cap-drop ALL --cap-add NET_ADMIN --cap-add NET_RAW -e SUPERVISOR_TOKEN=fixture-token -v "$RUNNER_TEMP/setup-data:/data" -v "$PWD/tests/linux:/opt/zigbee-link/ci-fixtures:ro" --entrypoint python3 zigbee-link:ci /opt/zigbee-link/ci-fixtures/setup_fixture.py app
+          docker run -d --name setup-proxy --network zigbee-setup-ci --ip 172.30.32.2 --cap-drop ALL -v "$PWD/tests/linux:/fixtures:ro" --entrypoint python3 zigbee-link:ci -c 'import time;time.sleep(280)'
+          for i in $(seq 1 30); do
+            if docker exec setup-proxy python3 -c 'from urllib.request import urlopen,Request; r=urlopen(Request("http://zigbee-setup-check:63001/api/session",headers={"X-Remote-User-Id":"synthetic-admin"})); assert r.status==200' >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec setup-fixture python3 -c 'from urllib.request import urlopen,Request; from urllib.error import HTTPError; req=Request("http://zigbee-setup-check:63001/api/session",headers={"X-Remote-User-Id":"synthetic-admin","X-Forwarded-For":"172.30.32.2"}); result=0; exec("try:\n urlopen(req)\nexcept HTTPError as e:\n result=e.code"); assert result==403, result'
+          docker exec setup-proxy python3 /fixtures/setup_fixture.py verify http://zigbee-setup-check:63001
+          for i in $(seq 1 50); do
+            if docker exec setup-fixture python3 -c 'import json,urllib.request; d=json.load(urllib.request.urlopen("http://localhost/fixture/state")); assert len(d["commands"])==2 and d["radio"]>0' >/dev/null 2>&1; then break; fi
+            sleep 3
+          done
+          docker exec setup-fixture python3 -c 'import json,urllib.request; d=json.load(urllib.request.urlopen("http://localhost/fixture/state")); assert sorted(d["commands"])==[["net_a_zigbee2mqtt","start"],["net_b_zigbee2mqtt","start"]] and d["radio"]>0, d'
+          docker exec setup-radio python3 -c 'from pathlib import Path; assert Path("/tmp/serial-connects").read_text()=="0"'
+          docker exec zigbee-setup-check python3 -c 'from pathlib import Path; print(Path("/proc/1/attr/current").read_text())' | grep "$profile (enforce)"
+          docker stop -t 45 zigbee-setup-check
+          test "$(docker inspect -f '{{.State.ExitCode}}' zigbee-setup-check)" = 0
+          if sudo dmesg | grep 'apparmor="DENIED"' | grep "profile=\"$profile\""; then exit 1; fi
+          docker rm zigbee-setup-check
+          docker rm -f setup-proxy setup-radio setup-fixture setup-broker
+          docker network rm zigbee-setup-ci
+          sudo apparmor_parser -R "$RUNNER_TEMP/setup-apparmor"
       - name: AppArmor failure diagnostics
         if: failure()
         run: |
           docker logs zigbee-check 2>&1 || true
           docker logs zigbee-recovery-check 2>&1 || true
           docker logs recovery-fixture 2>&1 || true
-          sudo dmesg | grep -E "zigbee_(ci|recovery)_${GITHUB_RUN_ID}" || true
+          docker logs zigbee-setup-check 2>&1 || true
+          docker logs setup-fixture 2>&1 || true
+          sudo dmesg | grep -E "zigbee_(ci|recovery|setup)_${GITHUB_RUN_ID}" || true
   arm64-build:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Build native aarch64 image
-        run: docker build --build-arg BUILD_VERSION=1.2.0 --build-arg BUILD_ARCH=aarch64 -t zigbee-link:arm64 zigbee_link
+        run: docker build --build-arg BUILD_VERSION="$(sed -n 's/^version: //p' zigbee_link/config.yaml)" --build-arg BUILD_ARCH=aarch64 -t zigbee-link:arm64 zigbee_link
       - name: Verify architecture and Python imports
-        run: docker run --rm --network none --cap-drop ALL --entrypoint python3 zigbee-link:arm64 -c 'import platform,sqlite3,importlib.metadata; import app.main,app.recovery.mqtt; assert platform.machine() == "aarch64"; assert importlib.metadata.version("paho-mqtt") == "2.1.0"'
+        run: docker run --rm --network none --cap-drop ALL --entrypoint python3 zigbee-link:arm64 -c 'import platform,sqlite3,importlib.metadata; import app.main,app.recovery.mqtt,app.web.server; assert platform.machine() == "aarch64"; assert importlib.metadata.version("paho-mqtt") == "2.1.0"; assert importlib.metadata.version("aiohttp") == "3.14.5"'

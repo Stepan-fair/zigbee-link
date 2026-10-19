@@ -61,6 +61,9 @@ class Fixture:
                         return self.send(outer.options)
                     if self.headers.get("Authorization") != "Bearer fixture-token":
                         return self.send({}, 401)
+                    extra = outer.extra_get(self.path)
+                    if extra is not None:
+                        return self.send(extra)
                     if self.path == "/addons/self/info":
                         return self.send({"result": "ok", "data": {"options": outer.options}})
                     if self.path == "/jobs/info":
@@ -77,6 +80,12 @@ class Fixture:
             def do_POST(self):
                 if self.headers.get("Authorization") != "Bearer fixture-token":
                     return self.send({}, 401)
+                if self.path == "/addons/self/options":
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 1024 * 1024:
+                        return self.send({}, 400)
+                    result = outer.extra_post(self.path, json.loads(self.rfile.read(length)))
+                    return self.send(result or {}, 200 if result is not None else 404)
                 if self.path in ("/fixture/pause", "/fixture/crash"):
                     length = int(self.headers.get("Content-Length", "0"))
                     if not 0 < length <= 1024:
@@ -116,6 +125,12 @@ class Fixture:
         self.http.daemon_threads = True
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
+
+    def extra_get(self, path):
+        return None
+
+    def extra_post(self, path, body):
+        return None
 
     def message(self, client, userdata, message):
         try:

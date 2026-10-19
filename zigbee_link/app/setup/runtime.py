@@ -185,6 +185,8 @@ class SetupController:
                     raise ValueError("network_required")
             elif not any(r.network_id == network_id and not r.tombstoned for r in snapshot.networks):
                 raise ValueError("unknown_network")
+            if managed is True and any(r.network_id == network_id and not r.accepted for r in snapshot.networks):
+                raise ValueError("network_not_accepted")
             records = tuple(replace(r, managed=r.managed if managed is None else managed,
                                     paused=r.paused if paused is None else paused) if r.network_id == network_id else r
                             for r in snapshot.networks)
