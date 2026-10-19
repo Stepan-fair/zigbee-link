@@ -6,6 +6,42 @@ from app.manager import Status
 from test_setup_runtime import controller, accept_one, candidate
 
 
+def test_container_setup_fixture_imports_app_from_working_directory(tmp_path):
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "__init__.py").write_text("")
+    (app / "main.py").write_text("def main(): return 0\n")
+    (app / "network.py").write_text("class CommandRunner: pass\n")
+    fixture = Path(__file__).parent / "linux/setup_fixture.py"
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run([sys.executable, str(fixture.resolve()), "app"], cwd=tmp_path,
+                            env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
+def test_container_setup_fixture_waits_for_mqtt_connection(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+    directory = Path(__file__).parent / "linux"
+    monkeypatch.syspath_prepend(str(directory))
+    spec = importlib.util.spec_from_file_location("isolated_setup_fixture", directory / "setup_fixture.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fixture = module.SetupFixture.__new__(module.SetupFixture)
+    fixture.broker_host, fixture.broker_port = "broker", 1883
+    fixture.records = {"a": {"base_topic": "z2m/a", "coordinator_ieee": "0x0000000000000001", "ip": "172.31.254.2"}}
+    def premature_publish(*args, **kwargs):
+        raise AssertionError("Published before CONNACK")
+    fixture.client = SimpleNamespace(is_connected=lambda: False, publish=premature_publish)
+    assert fixture.publish_metadata() is False
+
+
 def guided_two(tmp_path):
     ctl, fixture, clock = controller(tmp_path)
     snapshot, first = accept_one(ctl)

@@ -54,6 +54,8 @@ class SetupFixture(Fixture):
         super().message(client, userdata, message)
 
     def publish_metadata(self):
+        if not self.client.is_connected():
+            return False
         for index, record in enumerate(self.records.values()):
             self.client.publish(record["base_topic"] + "/bridge/info", json.dumps({"coordinator": {"ieee_address": record["coordinator_ieee"]},
                 "config": {"serial": {"port": "tcp://" + record["ip"] + ":6638"}, "mqtt": {"server": f"mqtt://{self.broker_host}:{self.broker_port}"}}}), qos=1, retain=True).wait_for_publish(timeout=2)
@@ -112,6 +114,7 @@ if __name__ == "__main__":
         verify_proxy(sys.argv[2])
     elif mode == "app":
         # Only this fixture treats Docker's Ethernet veth as a physical port.
+        sys.path.insert(0, str(Path.cwd()))
         import app.main as main
         from app.network import CommandRunner
         class EthernetFixtureRunner(CommandRunner):
