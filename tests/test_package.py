@@ -57,7 +57,7 @@ def test_checker_rejects_unlisted_file_and_secret(tmp_path):
 
 def test_recovery_release_manifest_and_files_are_complete(tmp_path):
     m=yaml.safe_load((ROOT/"zigbee_link/config.yaml").read_text())
-    assert m["version"]=="1.2.0"
+    assert m["version"]=="1.3.0"
     assert m["hassio_api"] is True and m["hassio_role"]=="manager"
     assert m["options"]["recovery"]=={"enabled":False,"mqtt":{},"networks":[]}
     pack=load_tool("package")
@@ -87,3 +87,44 @@ def test_setup_ingress_manifest_dependencies_and_allowlist():
 def test_ci_workflow_is_valid_yaml():
     workflow = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())
     assert {"linux", "arm64-build"} <= workflow["jobs"].keys()
+
+
+def test_automatic_setup_release_manifest_and_neutral_defaults():
+    manifest = yaml.safe_load((ROOT / "zigbee_link/config.yaml").read_text())
+    assert manifest["version"] == "1.3.0"
+    assert manifest["options"]["configuration_mode"] == "legacy"
+    assert manifest["options"]["recovery"] == {"enabled": False, "mqtt": {}, "networks": []}
+    assert manifest["options"]["coordinators"] == []
+    assert manifest["ingress"] is True and manifest["panel_admin"] is True
+    assert manifest["ingress_port"] == 0 and manifest["services"] == ["mqtt:want"]
+
+
+def test_all_new_runtime_and_static_files_are_allowlisted():
+    allowed = set(load_tool("package").ALLOWLIST)
+    paths = list((ROOT / "zigbee_link/app/setup").glob("*.py"))
+    paths += list((ROOT / "zigbee_link/app/web").glob("*.py"))
+    paths += list((ROOT / "zigbee_link/app/web/static").glob("*"))
+    assert all(path.relative_to(ROOT).as_posix() in allowed for path in paths if path.is_file())
+    assert len(allowed) == len(load_tool("package").ALLOWLIST)
+
+
+def test_package_excludes_setup_state_credentials_and_private_docs(tmp_path):
+    import shutil
+    source = tmp_path / "source"
+    allowed = load_tool("package").ALLOWLIST
+    for relative in allowed:
+        target = source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
+    import uuid
+    marker = "SYNTHETIC-PRIVATE-" + uuid.uuid4().hex
+    for relative in ("data/setup.sqlite", "data/recovery.sqlite", "data/setup-secrets/s-test.json", ".tools/local.txt", "docs/superpowers/private.md", "Инструкция.md"):
+        target = source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(marker, encoding="utf-8")
+    destination = tmp_path / "clean"
+    load_tool("package").package(source, destination)
+    files = {path.relative_to(destination).as_posix() for path in destination.rglob("*") if path.is_file()}
+    assert files == set(allowed)
+    assert all(marker.encode() not in (destination / relative).read_bytes() for relative in files)
+    assert load_tool("check_distribution").check_distribution(destination) == []
