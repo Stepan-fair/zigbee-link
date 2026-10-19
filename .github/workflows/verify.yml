@@ -27,7 +27,8 @@ jobs:
       - name: Validate AppArmor syntax
         run: sudo apparmor_parser -Q zigbee_link/apparmor.txt
       - name: Build amd64 image
-        run: docker build --build-arg BUILD_VERSION="$(sed -n 's/^version: //p' zigbee_link/config.yaml)" --build-arg BUILD_ARCH=amd64 -t zigbee-link:ci zigbee_link
+        run: |
+          docker build --build-arg BUILD_VERSION="$(sed -n 's/^version: //p' zigbee_link/config.yaml)" --build-arg BUILD_ARCH=amd64 -t zigbee-link:ci zigbee_link
       - name: Verify enforced AppArmor, ARP and clean exit
         run: |
           profile="zigbee_ci_${GITHUB_RUN_ID}"
@@ -161,6 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build native aarch64 image
-        run: docker build --build-arg BUILD_VERSION="$(sed -n 's/^version: //p' zigbee_link/config.yaml)" --build-arg BUILD_ARCH=aarch64 -t zigbee-link:arm64 zigbee_link
+        run: |
+          docker build --build-arg BUILD_VERSION="$(sed -n 's/^version: //p' zigbee_link/config.yaml)" --build-arg BUILD_ARCH=aarch64 -t zigbee-link:arm64 zigbee_link
       - name: Verify architecture and Python imports
         run: docker run --rm --network none --cap-drop ALL --entrypoint python3 zigbee-link:arm64 -c 'import platform,sqlite3,importlib.metadata; import app.main,app.recovery.mqtt,app.web.server; assert platform.machine() == "aarch64"; assert importlib.metadata.version("paho-mqtt") == "2.1.0"; assert importlib.metadata.version("aiohttp") == "3.14.5"'

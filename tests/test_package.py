@@ -82,3 +82,8 @@ def test_setup_ingress_manifest_dependencies_and_allowlist():
     for directory in (ROOT / "zigbee_link/app/setup", ROOT / "zigbee_link/app/web"):
         for path in directory.glob("*.py"):
             assert path.relative_to(ROOT).as_posix() in load_tool("package").ALLOWLIST
+
+
+def test_ci_workflow_is_valid_yaml():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())
+    assert {"linux", "arm64-build"} <= workflow["jobs"].keys()
