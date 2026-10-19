@@ -54,7 +54,12 @@ class HttpTransport:
                                                cwd=str(Path(__file__).resolve().parents[2]), stdin=subprocess.PIPE,
                                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 self.processes.add(process)
-            payload = json.dumps({"method": method, "path": path, "token": self._token}).encode()
+            if body is not None and (method != "POST" or path != "/addons/self/options" or not isinstance(body, dict)):
+                raise ValueError("Запрещённое тело запроса Supervisor")
+            payload = json.dumps({"method": method, "path": path, "token": self._token,
+                                  "body": body or {}}, allow_nan=False).encode()
+            if len(payload) > 1024 * 1024:
+                raise ValueError("Слишком большой запрос Supervisor")
             output, _ = process.communicate(payload, timeout=min(5, max(.05, timeout)))
             if process.returncode != 0 or len(output) > 1024 * 1024 + 16:
                 return HttpResult(503, b"")
@@ -84,11 +89,17 @@ ORIGIN = "http://supervisor"
 def _http_worker():
     """Private, bounded-output worker; its owner enforces the total deadline."""
     try:
-        raw = json.loads(sys.stdin.buffer.read(8192))
+        encoded = sys.stdin.buffer.read(1024 * 1024 + 1)
+        if len(encoded) > 1024 * 1024:
+            return 1
+        raw = json.loads(encoded)
         method, path = raw["method"], raw["path"]
         if method not in ("GET", "POST") or not path.startswith("/") or "//" in path or ".." in path:
             return 1
-        req = request.Request(ORIGIN + path, data=b"{}" if method == "POST" else None, method=method,
+        body = raw.get("body", {})
+        if not isinstance(body, dict) or body and (method != "POST" or path != "/addons/self/options"):
+            return 1
+        req = request.Request(ORIGIN + path, data=json.dumps(body, allow_nan=False).encode() if method == "POST" else None, method=method,
                               headers={"Authorization": "Bearer " + raw["token"], "Content-Type": "application/json"})
         opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
         with opener.open(req, timeout=5) as response:
