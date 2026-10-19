@@ -37,6 +37,12 @@ def make_recovery(raw, settings, identity, probe, data_dir, stopped):
     log = logging.getLogger("zigbee-link")
     for key in config.errors:
         log.warning("Привязка восстановления %s: настройка отклонена", key)
+    requested = raw.get("recovery", {})
+    if isinstance(requested, dict) and requested.get("enabled") is True:
+        if not requested.get("networks"):
+            log.warning("Восстановление не готово: Нет настроенных сетей (networks_empty)")
+        if not requested.get("mqtt"):
+            log.warning("Восстановление не готово: MQTT не настроен (mqtt_unconfigured)")
     if not config.bindings or config.mqtt is None:
         return None
     token = os.environ.get("SUPERVISOR_TOKEN", "")
