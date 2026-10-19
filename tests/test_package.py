@@ -15,7 +15,7 @@ def load_tool(name):
 
 def test_manifest_clean_defaults_and_required_caps():
     m = yaml.safe_load((ROOT / "zigbee_link/config.yaml").read_text())
-    assert m["options"] == {"parent": "auto", "address": "172.31.254.1/24", "coordinators": [], "scan_enabled": True, "recovery": {"enabled": False, "mqtt": {}, "networks": []}}
+    assert m["options"] == {"configuration_mode": "legacy", "parent": "auto", "address": "172.31.254.1/24", "coordinators": [], "scan_enabled": True, "recovery": {"enabled": False, "mqtt": {}, "networks": []}}
     assert set(m["privileged"]) == {"NET_ADMIN", "NET_RAW"}
     assert set(m["arch"]) == {"amd64", "aarch64"}
     assert m["host_network"] is True
@@ -68,3 +68,17 @@ def test_recovery_release_manifest_and_files_are_complete(tmp_path):
     assert "docs/superpowers/specs/2026-10-13-zigbee-link-recovery-design.md" not in pack.ALLOWLIST
     docker=(ROOT/"zigbee_link/Dockerfile").read_text()
     assert "paho-mqtt==2.1.0" in docker
+
+
+def test_setup_ingress_manifest_dependencies_and_allowlist():
+    manifest = yaml.safe_load((ROOT / "zigbee_link/config.yaml").read_text())
+    assert manifest.get("ingress") is True and manifest.get("ingress_port") == 0
+    assert manifest.get("panel_admin") is True
+    assert manifest.get("services") == ["mqtt:want"]
+    assert manifest["options"].get("configuration_mode") == "legacy"
+    assert manifest["schema"].get("configuration_mode") == "list(legacy|guided)"
+    assert "aiohttp==3.14.5" in (ROOT / "zigbee_link/Dockerfile").read_text()
+    assert "/opt/zigbee-deps/**/*.so mr," in (ROOT / "zigbee_link/apparmor.txt").read_text()
+    for directory in (ROOT / "zigbee_link/app/setup", ROOT / "zigbee_link/app/web"):
+        for path in directory.glob("*.py"):
+            assert path.relative_to(ROOT).as_posix() in load_tool("package").ALLOWLIST

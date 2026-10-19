@@ -47,6 +47,8 @@ class SetupController:
         self.mode = select_configuration_mode(options)
         self.capabilities = SupervisorCapabilities()
         self.service = None
+        self.web = None
+        self.next_web = 0
         self.closed = False
         self.last_catalog = -1
         self.next_capabilities = 0
@@ -439,6 +441,16 @@ class SetupController:
         except (OSError, ValueError, RuntimeError):
             self.last_error = "recovery_unavailable"
         service = self.service
+        if not self.web and self.capabilities.ingress_port and self.clock.monotonic() >= self.next_web:
+            try:
+                from ..web.server import IngressServer
+                from ..web.security import IngressSecurity
+                web_server = IngressServer(self, self.capabilities.ingress_port, IngressSecurity())
+                web_server.start()
+                self.web = web_server
+            except (OSError, ValueError, RuntimeError):
+                self.next_web = self.clock.monotonic() + 60
+                self.last_error = "ingress_unavailable"
         # Workers acquire the controller lock for permissions; do not join them under it.
         if service:
             try:
@@ -485,7 +497,10 @@ class SetupController:
                 return
             self.closed = True
             service, self.service = self.service, None
+            web_server, self.web = self.web, None
         # Stop all users before closing databases or the owning network interface.
+        if web_server:
+            web_server.close()
         self.discovery.close()
         if service:
             service.close(close_store=False)

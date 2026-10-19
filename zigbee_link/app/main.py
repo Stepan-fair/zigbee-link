@@ -74,6 +74,17 @@ def make_recovery(raw, settings, identity, probe, data_dir, stopped):
         return None
 
 
+def make_setup(raw, settings, identity, probe, data_dir, stopped):
+    if not os.environ.get("SUPERVISOR_TOKEN"):
+        return make_recovery(raw, settings, identity, probe, data_dir, stopped)
+    try:
+        from .setup.runtime import SetupController
+        return SetupController(raw, settings, identity, probe, data_dir, stopped)
+    except Exception as exc:
+        logging.getLogger("zigbee-link").error("Настройка и восстановление недоступны (%s); сетевой режим продолжает работу", type(exc).__name__)
+        return None
+
+
 def main(options_path: Path = Path("/data/options.json"), data_dir: Path = Path("/data")) -> int:
     logging.basicConfig(level=logging.INFO, format="[Zigbee Link] %(message)s")
     log = logging.getLogger("zigbee-link")
@@ -94,10 +105,15 @@ def main(options_path: Path = Path("/data/options.json"), data_dir: Path = Path(
                 log.info("Интерфейс %s: %s, %s", link["ifname"], snapshot.kinds.get(link["ifname"], "виртуальный/неподдерживаемый"), "кабель подключён" if "LOWER_UP" in link.get("flags", []) else "нет соединения")
             probe = ArpProbe(wait=stopped.wait, cancelled=stopped.is_set)
             manager = InterfaceManager(settings, identity, runner, probe)
-            recovery = make_recovery(raw, settings, identity, probe, data_dir, stopped)
+            recovery = make_setup(raw, settings, identity, probe, data_dir, stopped)
             last = None
             try:
                 while not stopped.is_set():
+                    if recovery and hasattr(recovery, "effective_settings"):
+                        try:
+                            manager.settings = recovery.effective_settings()
+                        except (OSError, ValueError, RuntimeError):
+                            pass
                     status = manager.reconcile()
                     if recovery:
                         try:

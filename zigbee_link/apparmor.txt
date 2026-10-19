@@ -29,6 +29,7 @@ profile zigbee_link flags=(attach_disconnected,mediate_deleted) {
   /usr/lib/python*/lib-dynload/*.so mr,
   /opt/zigbee-deps/ r,
   /opt/zigbee-deps/** r,
+  /opt/zigbee-deps/**/*.so mr,
   /opt/zigbee-link/ r,
   /opt/zigbee-link/** r,
   /etc/** r,

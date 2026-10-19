@@ -28,6 +28,17 @@ ALLOWLIST = (
     "tests/test_recovery_service.py", "tests/test_recovery_main.py",
     "tests/linux/test_recovery_runtime.py",
     "tests/linux/recovery_fixture.py",
+    "zigbee_link/app/setup/__init__.py", "zigbee_link/app/setup/model.py",
+    "zigbee_link/app/setup/validation.py", "zigbee_link/app/setup/store.py",
+    "zigbee_link/app/setup/secrets.py", "zigbee_link/app/setup/supervisor.py",
+    "zigbee_link/app/setup/matching.py", "zigbee_link/app/setup/mqtt.py",
+    "zigbee_link/app/setup/service.py", "zigbee_link/app/setup/runtime.py",
+    "zigbee_link/app/web/__init__.py", "zigbee_link/app/web/security.py",
+    "zigbee_link/app/web/server.py",
+    "tests/test_setup_validation.py", "tests/test_setup_store.py", "tests/test_setup_secrets.py",
+    "tests/test_setup_supervisor.py", "tests/test_setup_matching.py", "tests/test_setup_mqtt.py",
+    "tests/test_setup_service.py", "tests/test_setup_runtime.py", "tests/test_setup_migration.py",
+    "tests/test_setup_journal.py", "tests/test_setup_web.py", "tests/test_setup_web_security.py",
 )
 
 

@@ -17,7 +17,13 @@ init: false
 timeout: 45
 hassio_api: true
 hassio_role: manager
+ingress: true
+ingress_port: 0
+panel_admin: true
+services:
+  - mqtt:want
 options:
+  configuration_mode: legacy
   parent: auto
   address: 172.31.254.1/24
   coordinators: []
@@ -27,6 +33,7 @@ options:
     mqtt: {}
     networks: []
 schema:
+  configuration_mode: list(legacy|guided)
   parent: str
   address: str
   coordinators:
