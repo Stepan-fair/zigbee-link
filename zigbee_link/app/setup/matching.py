@@ -45,7 +45,7 @@ def _candidate(app, bridge, broker, subnet, conflicts, *, ambiguous=False):
                           app.base_topic and app.base_topic != bridge.base_topic):
         issues.append("source_conflict")
         kind = "conflict"
-    if any(not broker_matches(server, broker) for server in (
+    if broker is not None and any(not broker_matches(server, broker) for server in (
             app.broker_server if app else None, bridge.broker_server if bridge else None)):
         issues.append("foreign_broker")
         kind = "conflict"
@@ -63,6 +63,9 @@ def _candidate(app, bridge, broker, subnet, conflicts, *, ambiguous=False):
         issues.append("bridge_metadata_missing")
         if kind == "verified":
             kind = "proposed"
+    if broker is None:
+        issues.append("mqtt_unconfigured")
+        kind = "proposed" if kind != "conflict" else kind
     name = ((app.name if app else "Zigbee2MQTT") + (" · " + ip if ip else ""))[:100]
     values = {"name": name, "ip": ip, "serial_port": port, "adapter": app.adapter if app else None,
               "addon_slug": app.slug if app else None, "base_topic": topic,

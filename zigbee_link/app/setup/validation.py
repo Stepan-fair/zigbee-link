@@ -1,5 +1,6 @@
 """Strict boundary validation; partially discovered settings confer no rights."""
 import json
+import math
 from ipaddress import IPv4Address
 from ..recovery.settings import IEEE, SLUG, IDENTIFIER
 from .model import Readiness, FieldValue
@@ -20,6 +21,13 @@ def _unique(pairs):
 
 def _invalid_constant(value):
     raise ValueError("non_finite_number")
+
+
+def _finite_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non_finite_number")
+    return parsed
 
 
 def decode_metadata(payload: bytes) -> object:
@@ -44,7 +52,8 @@ def decode_metadata(payload: bytes) -> object:
         elif c in (93, 125):
             depth -= 1
     try:
-        return json.loads(payload, object_pairs_hook=_unique, parse_constant=_invalid_constant)
+        return json.loads(payload.decode("utf-8"), object_pairs_hook=_unique,
+                          parse_constant=_invalid_constant, parse_float=_finite_float)
     except (UnicodeError, RecursionError) as exc:
         raise ValueError("invalid_metadata") from None
 

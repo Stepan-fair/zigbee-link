@@ -15,8 +15,8 @@ def test_enabled_empty_recovery_is_not_reported_configured():
 
 
 @pytest.mark.parametrize("payload", [b'{}' + b' ' * 1048576, b'[' * 33 + b'0' + b']' * 33,
-                                    b'{"ip": "a", "ip": "b"}', b'{"x":NaN}', b'{"x":Infinity}'],
-                         ids=["oversize", "depth", "duplicate", "nan", "infinity"])
+                                    b'{"ip": "a", "ip": "b"}', b'{"x":NaN}', b'{"x":Infinity}', b'{"x":1e9999}'],
+                         ids=["oversize", "depth", "duplicate", "nan", "infinity", "overflow"])
 def test_metadata_limits_and_duplicate_identity_keys(payload):
     from app.setup.validation import decode_metadata
     with pytest.raises(ValueError):

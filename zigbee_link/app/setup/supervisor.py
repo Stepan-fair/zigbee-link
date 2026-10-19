@@ -5,6 +5,7 @@ from ipaddress import IPv4Address
 import json
 import re
 import threading
+import time
 from urllib.parse import urlsplit
 from ..recovery.settings import MqttSettings, SLUG, _mqtt
 from .model import AppMetadata, BrokerRecord, BrokerConnection, SupervisorCapabilities
@@ -41,14 +42,35 @@ class SupervisorCatalogReader:
         self.transport = transport
         self.issues = ()
         self.slots = threading.BoundedSemaphore(2)
+        self.scan_cancelled = threading.Event()
+        self.scan_deadline = None
 
-    def _get(self, path, *, optional=False, method="GET", body=None):
+    def begin_scan(self, deadline):
+        self.scan_deadline = deadline
+        self.scan_cancelled.clear()
+
+    def cancel_scan(self):
+        self.scan_cancelled.set()
+
+    def _get(self, path, *, optional=False, method="GET", body=None, scan=False):
         if method not in ("GET", "POST") or method == "POST" and path != "/addons/self/options":
             raise ValueError("setup_endpoint_forbidden")
-        if not self.slots.acquire(timeout=5):
+        timeout = 5
+        if scan:
+            if self.scan_cancelled.is_set():
+                raise DiscoverySourceError("scan_cancelled")
+            if self.scan_deadline is not None:
+                timeout = min(5, self.scan_deadline - time.monotonic())
+                if timeout <= 0:
+                    raise DiscoverySourceError("scan_timeout")
+        started = time.monotonic()
+        if not self.slots.acquire(timeout=timeout):
             raise DiscoverySourceError("supervisor_busy")
         try:
-            response = self.transport.request(method, path, body=body, timeout=5)
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0 or scan and self.scan_cancelled.is_set():
+                raise DiscoverySourceError("scan_timeout")
+            response = self.transport.request(method, path, body=body, timeout=remaining)
         except (OSError, TimeoutError, ValueError):
             raise DiscoverySourceError("supervisor_unavailable") from None
         finally:
@@ -66,16 +88,19 @@ class SupervisorCatalogReader:
             raise DiscoverySourceError("supervisor_response_invalid") from None
 
     def apps(self):
-        raw = self._get("/addons")
+        raw = self._get("/addons", scan=True)
         if not isinstance(raw.get("addons"), list):
             raise DiscoverySourceError("supervisor_response_invalid")
         result, issues = [], []
         for item in raw["addons"][:1024]:
+            if self.scan_cancelled.is_set() or self.scan_deadline is not None and time.monotonic() >= self.scan_deadline:
+                issues.append("scan_timeout")
+                break
             slug = item.get("slug") if isinstance(item, dict) else None
             if not isinstance(slug, str) or not SLUG.fullmatch(slug) or "zigbee2mqtt" not in slug or item.get("installed") is False:
                 continue
             try:
-                info = self._get(f"/addons/{slug}/info")
+                info = self._get(f"/addons/{slug}/info", scan=True)
             except DiscoverySourceError:
                 issues.append("addon_info_unavailable")
                 continue
@@ -111,8 +136,8 @@ class SupervisorCatalogReader:
         self.issues = tuple(dict.fromkeys(issues))
         return tuple(result)
 
-    def mqtt_service(self):
-        raw = self._get("/services/mqtt", optional=True)
+    def mqtt_service(self, *, scan=False):
+        raw = self._get("/services/mqtt", optional=True, scan=scan)
         if raw is None:
             return None
         try:
@@ -124,7 +149,7 @@ class SupervisorCatalogReader:
             server = f"{scheme}://{host}:{port}"
             settings = _mqtt({"server": server, "username": raw.get("username", ""), "password": raw.get("password", "")})
             aliases = {host}
-            info = self._get(f"/addons/{provider}/info")
+            info = self._get(f"/addons/{provider}/info", scan=scan)
             if info.get("slug") != provider:
                 raise ValueError("invalid_provider")
             for key in ("hostname", "ip_address"):
