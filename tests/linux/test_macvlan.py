@@ -59,6 +59,8 @@ class Runner(CommandRunner):
     def classify(self, links): return {{"eth0": "ethernet"}}
     def run(self, argv):
         value = super().run(argv)
+        if argv[:4] == ["nft", "-j", "list", "table"]:
+            print("NFT_TEST_SNAPSHOT", value)
         if argv[:5] == ["ip", "-j", "-d", "link", "show"]:
             links=json.loads(value)
             for link in links:

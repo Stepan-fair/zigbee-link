@@ -254,13 +254,13 @@ def test_haos_without_clsact_can_reach_ready_with_ipv6_guard(tmp_path):
     assert r.addresses[0]["addr_info"][0]["local"] == "172.31.254.1"
 
 
-def test_unavailable_nft_never_assigns_address_or_leaves_new_interface(tmp_path):
+def test_unavailable_nft_never_assigns_address_or_activates_interface(tmp_path):
     m, r, _ = make(tmp_path)
     r.tc_supported = False
     r.nft_fail = True
     assert m.reconcile().state == "error"
     assert not r.addresses
-    assert [l["ifname"] for l in r.links] == ["eth0"]
+    assert all("UP" not in l["flags"] for l in r.links if l["ifname"] == "zigbee0")
 
 
 def test_lost_filter_is_reinstalled_before_interface_returns_up(tmp_path):
@@ -326,3 +326,25 @@ def test_new_interface_generation_replaces_only_its_stale_filter(tmp_path):
     r.addresses = []; r.routes = r.routes[:1]
     assert m.reconcile().state == "ready"
     assert r.nft[1]["chain"]["comment"].endswith(":21")
+
+
+def test_stop_preserves_modified_rules_before_kernel_can_delete_them(tmp_path):
+    m, r, _ = make(tmp_path)
+    assert m.reconcile().state == "ready"
+    r.nft[-1]["rule"]["expr"][-1] = {"accept": None}
+    original = copy.deepcopy(r.nft)
+    m.stop()
+    assert r.nft == original
+    assert "UP" not in r.links[1]["flags"]
+
+
+@pytest.mark.parametrize("obstacle", ["overlap", "cable", "extra_address"])
+def test_lost_protection_closes_owned_interface_before_early_exit(tmp_path, obstacle):
+    m, r, _ = make(tmp_path)
+    assert m.reconcile().state == "ready"
+    r.nft = None
+    if obstacle == "overlap": r.routes.append({"dst": "172.31.254.0/24", "dev": "eth0"})
+    elif obstacle == "cable": r.links[0]["flags"] = ["UP"]
+    else: r.addresses[0]["addr_info"].append({"family": "inet", "local": "192.168.70.1", "prefixlen": 24})
+    assert m.reconcile().state in ("error", "waiting")
+    assert "UP" not in r.links[1]["flags"]

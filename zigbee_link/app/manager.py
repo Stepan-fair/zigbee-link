@@ -141,11 +141,26 @@ class InterfaceManager:
         self._guard(index)
         self.runner.run(args)
 
+    def _owned_down(self, index):
+        # Emergency isolation may not remove or rewrite unexpected addresses/routes.
+        snapshot = read_snapshot(self.runner)
+        link = snapshot.link(INTERFACE)
+        if not self._owned(snapshot, link) or link["ifindex"] != index:
+            raise NetworkError("Принадлежность zigbee0 изменилась; изменение запрещено")
+        if "UP" in link.get("flags", []):
+            self.runner.run(["ip", "link", "set", "dev", INTERFACE, "down"])
+
     def _delete(self):
         snapshot = read_snapshot(self.runner)
         link = snapshot.link(INTERFACE)
         if link is not None:
             _, link = self._guard(link["ifindex"])
+            try:
+                # Device deletion itself can remove netdev rules: verify first.
+                self._filter_state()
+            except NetworkError:
+                self._owned_down(link["ifindex"])
+                raise
             self._command(["ip", "link", "delete", "dev", INTERFACE], link["ifindex"])
         self._remove_filter()
         self.verified = self.scanned = None
@@ -229,9 +244,7 @@ class InterfaceManager:
                 self._command(["ip", "link", "set", "dev", INTERFACE, "addrgenmode", "none"], index)
         except NetworkError:
             # Loss or corruption of protection must not leave our interface active.
-            _, link = self._guard(index)
-            if "UP" in link.get("flags", []):
-                self._command(["ip", "link", "set", "dev", INTERFACE, "down"], index)
+            self._owned_down(index)
             raise
 
     def _has_address(self, snapshot, value):
@@ -324,6 +337,14 @@ class InterfaceManager:
             had_owned = self._owned(snapshot, link)
             if link and not had_owned:
                 raise NetworkError("Имя zigbee0 занято чужим интерфейсом; остановите старое приложение")
+            if had_owned:
+                try:
+                    state = self._filter_state()
+                except NetworkError:
+                    self._owned_down(link["ifindex"])
+                    raise
+                if state is None or state[1] != link["ifindex"]:
+                    self._owned_down(link["ifindex"])
             parent = select_parent(self.settings, snapshot)
             return self._prepare(self.settings, parent)
         except WaitingForLink as exc:
