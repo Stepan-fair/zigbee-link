@@ -87,6 +87,21 @@ assert read_snapshot(runner).link("zigbee0") is None
 ''')
 
 
+def test_filter_lifecycle_preserves_unrelated_firewall_table(lan):
+    inside(lan, '''
+runner.run(["nft", 'create table inet unrelated { comment "leave-me-alone"; }'])
+before=json.loads(runner.run(["nft","-j","list","table","inet","unrelated"]))
+status=manager.reconcile(); assert status.state == "ready", status
+own="zigbee_link_"+identity.token.replace("-", "")
+table=json.loads(runner.run(["nft","-j","list","table","netdev",own]))
+assert any(r.get("chain",{}).get("dev")=="zigbee0" for r in table["nftables"]), table
+manager.stop()
+assert json.loads(runner.run(["nft","-j","list","table","inet","unrelated"])) == before
+tables=json.loads(runner.run(["nft","-j","list","tables","netdev"]))["nftables"]
+assert not any(r.get("table",{}).get("name")==own for r in tables)
+''')
+
+
 def test_targeted_arp_observes_return_without_touching_other_coordinator(lan):
     inside(lan, '''
 from ipaddress import IPv4Address

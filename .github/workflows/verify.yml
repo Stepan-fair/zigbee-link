@@ -17,7 +17,7 @@ jobs:
         run: |
           python -m pip install pytest PyYAML scapy paho-mqtt==2.1.0 aiohttp==3.14.5
           sudo apt-get update -qq
-          sudo apt-get install -y iproute2 iputils-ping iptables apparmor-utils mosquitto mosquitto-clients openssl
+          sudo apt-get install -y iproute2 iputils-ping iptables nftables apparmor-utils mosquitto mosquitto-clients openssl
       - name: Test real Linux networking
         run: sudo "$(which python)" -m pytest tests -q --tb=short
       - name: Check clean distribution

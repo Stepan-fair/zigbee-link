@@ -144,34 +144,95 @@ class InterfaceManager:
     def _delete(self):
         snapshot = read_snapshot(self.runner)
         link = snapshot.link(INTERFACE)
-        if link is None:
-            return
-        _, link = self._guard(link["ifindex"])
-        self._command(["ip", "link", "delete", "dev", INTERFACE], link["ifindex"])
+        if link is not None:
+            _, link = self._guard(link["ifindex"])
+            self._command(["ip", "link", "delete", "dev", INTERFACE], link["ifindex"])
+        self._remove_filter()
         self.verified = self.scanned = None
+
+    def _filter_state(self):
+        """Read only our UUID-scoped netdev table; reject foreign or altered objects."""
+        name = "zigbee_link_" + self.identity.token.replace("-", "")
+        try:
+            listing = json.loads(self.runner.run(["nft", "-j", "list", "tables", "netdev"]))["nftables"]
+            if not isinstance(listing, list) or any(not isinstance(r, dict) for r in listing):
+                raise ValueError("invalid table listing")
+            if not any(r.get("table", {}).get("name") == name and r["table"].get("family") == "netdev" for r in listing):
+                return None
+            records = json.loads(self.runner.run(["nft", "-j", "list", "table", "netdev", name]))["nftables"]
+            if not isinstance(records, list) or any(not isinstance(r, dict) or len(r) != 1 for r in records):
+                raise ValueError("invalid filter records")
+            objects = [r for r in records if "metainfo" not in r]
+            tables = [r["table"] for r in objects if "table" in r]
+            chains = [r["chain"] for r in objects if "chain" in r]
+            rules = [r["rule"] for r in objects if "rule" in r]
+            if len(tables) != 1 or len(objects) != len(tables) + len(chains) + len(rules):
+                raise ValueError("unexpected filter objects")
+            table = tables[0]
+            handle = table.get("handle")
+            if (table.get("family"), table.get("name"), table.get("comment")) != ("netdev", name, self.identity.alias) or table.get("flags") or type(handle) is not int or handle <= 0:
+                raise ValueError("foreign filter table")
+            # Deleting a bound device removes its chains on supported kernels.
+            if not chains and not rules:
+                return handle, None
+            if len(chains) != 1 or len(rules) != 1:
+                raise ValueError("unexpected filter contents")
+            chain, rule = chains[0], rules[0]
+            if any(chain.get(k) != v for k, v in dict(family="netdev", table=name, name="ipv4_only", type="filter", hook="ingress", dev=INTERFACE, prio=-500, policy="accept").items()) or chain.get("flags"):
+                raise ValueError("unexpected ingress chain")
+            prefix = self.identity.alias + ":"
+            comment = chain.get("comment", "")
+            if not isinstance(comment, str) or not comment.startswith(prefix):
+                raise ValueError("missing filter generation")
+            generation = int(comment[len(prefix):])
+            if generation <= 0 or comment != prefix + str(generation):
+                raise ValueError("invalid filter generation")
+            if any(rule.get(k) != v for k, v in dict(family="netdev", table=name, chain="ipv4_only").items()):
+                raise ValueError("unexpected ingress rule")
+            expected = [{"match": {"op": "==", "left": {"payload": {"protocol": "ether", "field": "type"}}, "right": "ip6"}}, {"drop": None}]
+            numeric = [{"match": {"op": "==", "left": {"payload": {"protocol": "ether", "field": "type"}}, "right": 34525}}, {"drop": None}]
+            if rule.get("expr") not in (expected, numeric):
+                raise ValueError("unexpected ingress expression")
+            return handle, generation
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise NetworkError("Не удалось подтвердить собственную IPv4-защиту zigbee0") from exc
+
+    def _remove_filter(self):
+        state = self._filter_state()
+        if state is not None:
+            # The kernel handle prevents deleting a replacement table with the same name.
+            self.runner.run(["nft", "delete", "table", "netdev", "handle", str(state[0])])
+
 
     def _ipv4_only(self, index):
         self._guard(index)
         try:
-            qdiscs = json.loads(self.runner.run(["tc", "-j", "qdisc", "show", "dev", INTERFACE]))
-            filters = json.loads(self.runner.run(["tc", "-j", "filter", "show", "dev", INTERFACE, "ingress"]))
-            if not isinstance(qdiscs, list) or not isinstance(filters, list):
-                raise ValueError("invalid tc state")
-            valid = bool(filters) and all(f.get("protocol") == "ipv6" and f.get("pref") == 49151 and f.get("kind") == "matchall" for f in filters) and any(a.get("kind") == "gact" and a.get("control_action", {}).get("type") == "drop" for f in filters for a in f.get("options", {}).get("actions", []))
-            if filters and not valid:
-                raise NetworkError("Чужой ingress-фильтр на zigbee0; изменение запрещено")
-            if not valid:
+            state = self._filter_state()
+            if state is None or state[1] != index:
                 _, link = self._guard(index)
                 if "UP" in link.get("flags", []):
                     self._command(["ip", "link", "set", "dev", INTERFACE, "down"], index)
-                if not any(q.get("kind") == "clsact" for q in qdiscs):
-                    self._command(["tc", "qdisc", "add", "dev", INTERFACE, "clsact"], index)
-                self._command(["tc", "filter", "add", "dev", INTERFACE, "ingress", "protocol", "ipv6", "pref", "49151", "handle", "1", "matchall", "action", "drop"], index)
+                self._remove_filter()
+                name = "zigbee_link_" + self.identity.token.replace("-", "")
+                owner = self.identity.alias
+                # One nft transaction: no partially installed chain can be accepted.
+                script = (f'create table netdev {name} {{ comment "{owner}"; }}; '
+                          f'add chain netdev {name} ipv4_only {{ type filter hook ingress device "{INTERFACE}" priority -500; '
+                          f'policy accept; comment "{owner}:{index}"; }}; '
+                          f'add rule netdev {name} ipv4_only ether type ip6 drop')
+                self._command(["nft", script], index)
+                state = self._filter_state()
+                if state is None or state[1] != index:
+                    raise NetworkError("Установка IPv4-защиты zigbee0 не подтверждена")
             _, link = self._guard(index)
             if link.get("inet6_addr_gen_mode") != "none":
                 self._command(["ip", "link", "set", "dev", INTERFACE, "addrgenmode", "none"], index)
-        except (ValueError, TypeError, AttributeError) as exc:
-            raise NetworkError("Не удалось проверить IPv4-защиту zigbee0") from exc
+        except NetworkError:
+            # Loss or corruption of protection must not leave our interface active.
+            _, link = self._guard(index)
+            if "UP" in link.get("flags", []):
+                self._command(["ip", "link", "set", "dev", INTERFACE, "down"], index)
+            raise
 
     def _has_address(self, snapshot, value):
         return any(r.get("ifname") == INTERFACE and any(a.get("family") == "inet" and f"{a['local']}/{a['prefixlen']}" == value for a in r.get("addr_info", [])) for r in snapshot.addresses)
@@ -289,7 +350,7 @@ class InterfaceManager:
     def stop(self):
         try:
             snapshot = read_snapshot(self.runner)
-            if self._owned(snapshot, snapshot.link(INTERFACE)):
+            if snapshot.link(INTERFACE) is None or self._owned(snapshot, snapshot.link(INTERFACE)):
                 self._delete()
         except (NetworkError, OSError, ValueError) as exc:
             LOG.error("Очистка не выполнена: %s", exc)
