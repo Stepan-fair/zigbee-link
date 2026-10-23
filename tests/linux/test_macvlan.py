@@ -96,7 +96,7 @@ before=json.loads(runner.run(["nft","-j","list","table","inet","unrelated"]))
 status=manager.reconcile(); assert status.state == "ready", status
 own="zigbee_link_"+identity.token.replace("-", "")
 table=json.loads(runner.run(["nft","-j","list","table","netdev",own]))
-assert any(r.get("chain",{}).get("dev")=="zigbee0" for r in table["nftables"]), table
+assert any(r.get("chain",{}).get("hook")=="ingress" for r in table["nftables"]), table
 manager.stop()
 assert json.loads(runner.run(["nft","-j","list","table","inet","unrelated"])) == before
 tables=json.loads(runner.run(["nft","-j","list","tables","netdev"]))["nftables"]

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import tempfile
 import time
@@ -193,8 +194,16 @@ class InterfaceManager:
             if len(chains) != 1 or len(rules) != 1:
                 raise ValueError("unexpected filter contents")
             chain, rule = chains[0], rules[0]
-            if any(chain.get(k) != v for k, v in dict(family="netdev", table=name, name="ipv4_only", type="filter", hook="ingress", dev=INTERFACE, prio=-500, policy="accept").items()) or chain.get("flags"):
+            if any(chain.get(k) != v for k, v in dict(family="netdev", table=name, name="ipv4_only", type="filter", hook="ingress", prio=-500, policy="accept").items()) or chain.get("flags"):
                 raise ValueError("unexpected ingress chain")
+            if "dev" not in chain:
+                # nft 1.0.9 omits the device from JSON. Confirm the real base-chain
+                # declaration independently rather than treating omission as a match.
+                text = self.runner.run(["nft", "list", "chain", "netdev", name, "ipv4_only"])
+                if not re.search(r'(?m)^[ \t]*type filter hook ingress device (?:zigbee0|"zigbee0") priority -500; policy accept;[ \t]*$', text):
+                    raise ValueError("unconfirmed ingress device")
+            elif chain["dev"] != INTERFACE:
+                raise ValueError("unexpected ingress device")
             prefix = self.identity.alias + ":"
             comment = chain.get("comment", "")
             if not isinstance(comment, str) or not comment.startswith(prefix):

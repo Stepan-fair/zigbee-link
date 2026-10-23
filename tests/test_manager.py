@@ -18,6 +18,7 @@ class FakeRunner:
         self.tc_supported = True
         self.nft = None
         self.nft_fail = False
+        self.nft_device = "zigbee0"
 
     def classify(self, links): return {"eth0": "ethernet"}
 
@@ -25,6 +26,8 @@ class FakeRunner:
         if args[0] == "nft":
             if self.nft_fail:
                 raise NetworkError("injected nft failure")
+            if args[1:3] == ["list", "chain"]:
+                return f'type filter hook ingress device "{self.nft_device}" priority -500; policy accept;\n'
             if args[1:4] == ["-j", "list", "tables"]:
                 return json.dumps({"nftables": [self.nft[0]] if self.nft else []})
             if args[1:4] == ["-j", "list", "table"]:
@@ -347,4 +350,16 @@ def test_lost_protection_closes_owned_interface_before_early_exit(tmp_path, obst
     elif obstacle == "cable": r.links[0]["flags"] = ["UP"]
     else: r.addresses[0]["addr_info"].append({"family": "inet", "local": "192.168.70.1", "prefixlen": 24})
     assert m.reconcile().state in ("error", "waiting")
+    assert "UP" not in r.links[1]["flags"]
+
+
+def test_older_nft_json_requires_independent_device_confirmation(tmp_path):
+    m, r, _ = make(tmp_path)
+    assert m.reconcile().state == "ready"
+    del r.nft[1]["chain"]["dev"]
+    r.commands.clear()
+    assert m.reconcile().state == "ready"
+    assert not r.commands
+    r.nft_device = "eth0"
+    assert m.reconcile().state == "error"
     assert "UP" not in r.links[1]["flags"]
