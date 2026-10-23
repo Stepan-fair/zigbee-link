@@ -57,7 +57,7 @@ def test_checker_rejects_unlisted_file_and_secret(tmp_path):
 
 def test_recovery_release_manifest_and_files_are_complete(tmp_path):
     m=yaml.safe_load((ROOT/"zigbee_link/config.yaml").read_text())
-    assert m["version"]=="1.3.0"
+    assert m["version"]=="1.3.1"
     assert m["hassio_api"] is True and m["hassio_role"]=="manager"
     assert m["options"]["recovery"]=={"enabled":False,"mqtt":{},"networks":[]}
     pack=load_tool("package")
@@ -91,7 +91,7 @@ def test_ci_workflow_is_valid_yaml():
 
 def test_automatic_setup_release_manifest_and_neutral_defaults():
     manifest = yaml.safe_load((ROOT / "zigbee_link/config.yaml").read_text())
-    assert manifest["version"] == "1.3.0"
+    assert manifest["version"] == "1.3.1"
     assert manifest["options"]["configuration_mode"] == "legacy"
     assert manifest["options"]["recovery"] == {"enabled": False, "mqtt": {}, "networks": []}
     assert manifest["options"]["coordinators"] == []

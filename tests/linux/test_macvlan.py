@@ -59,6 +59,8 @@ class Runner(CommandRunner):
     def classify(self, links): return {{"eth0": "ethernet"}}
     def run(self, argv):
         value = super().run(argv)
+        if argv[:4] == ["nft", "-j", "list", "table"]:
+            print("NFT_TEST_SNAPSHOT", value)
         if argv[:5] == ["ip", "-j", "-d", "link", "show"]:
             links=json.loads(value)
             for link in links:
@@ -84,6 +86,21 @@ for ip in ("172.31.254.2", "172.31.254.3"):
 assert len([l for l in read_snapshot(runner).links if l["ifname"] == "zigbee0"]) == 1
 manager.stop()
 assert read_snapshot(runner).link("zigbee0") is None
+''')
+
+
+def test_filter_lifecycle_preserves_unrelated_firewall_table(lan):
+    inside(lan, '''
+runner.run(["nft", 'create table inet unrelated { comment "leave-me-alone"; }'])
+before=json.loads(runner.run(["nft","-j","list","table","inet","unrelated"]))
+status=manager.reconcile(); assert status.state == "ready", status
+own="zigbee_link_"+identity.token.replace("-", "")
+table=json.loads(runner.run(["nft","-j","list","table","netdev",own]))
+assert any(r.get("chain",{}).get("hook")=="ingress" for r in table["nftables"]), table
+manager.stop()
+assert json.loads(runner.run(["nft","-j","list","table","inet","unrelated"])) == before
+tables=json.loads(runner.run(["nft","-j","list","tables","netdev"]))["nftables"]
+assert not any(r.get("table",{}).get("name")==own for r in tables)
 ''')
 
 
