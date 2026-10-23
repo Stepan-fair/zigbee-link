@@ -35,6 +35,7 @@ profile zigbee_link flags=(attach_disconnected,mediate_deleted) {
   /etc/** r,
   /usr/share/iproute2/group r,
   /usr/share/iproute2/rt_tables r,
+  /usr/share/iproute2/rt_realms r,
   /sys/class/net/ r,
   /sys/class/net/** r,
   /sys/devices/** r,
